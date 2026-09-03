@@ -1,0 +1,16 @@
+# database — everyone should have their own
+*.db
+*.db-wal
+*.db-shm
+
+# python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# node, if you add it later
+node_modules/
+
+# os junk
+.DS_Store

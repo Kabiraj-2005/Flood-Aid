@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>FloodAid — field</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:Arial,Helvetica,sans-serif;color:#1C1C1C;background:#fff;
+       max-width:480px;margin:0 auto}
+  header{padding:13px 18px 12px;border-bottom:1px solid #ECECEC}
+  header .brand{font-size:15px;font-weight:bold}
+  header .who{font-size:10.5px;color:#8C8C8C;margin-top:2px}
+  #status{background:#1C1C1C;color:#fff;padding:9px 18px;font-size:11.5px;
+          display:flex;justify-content:space-between;align-items:center}
+  #status .dot{display:inline-block;width:6px;height:6px;border-radius:50%;
+               margin-right:7px;vertical-align:1px;background:#E8593C}
+  #status.online .dot{background:#2E9B99}
+  #status .q{color:#B9B9B9;font-size:10.5px}
+  main{padding:17px 18px 40px}
+  .eyebrow{font-size:10px;font-weight:bold;color:#E8593C;letter-spacing:.6px;
+           text-transform:uppercase;margin-bottom:11px}
+  label{display:block;font-size:11px;color:#8C8C8C;margin:0 0 4px}
+  input,textarea,select{width:100%;border:1px solid #DFDFDF;padding:9px 11px;
+        font-size:13px;font-family:inherit;margin-bottom:12px;background:#fff}
+  textarea{resize:vertical;min-height:64px}
+  .two{display:flex;gap:11px}.two>div{flex:1}
+  .chips{display:flex;gap:7px;margin-bottom:12px}
+  .chips button{flex:1;padding:9px 0;font-size:11.5px;border:1px solid #DFDFDF;
+                background:#fff;color:#8C8C8C;font-family:inherit;cursor:pointer}
+  .chips button.on{border-color:#1C1C1C;color:#1C1C1C;font-weight:bold}
+  .checks{display:flex;gap:16px;margin-bottom:14px;font-size:12px}
+  .checks label{display:flex;align-items:center;gap:6px;color:#1C1C1C;font-size:12px}
+  .checks input{width:auto;margin:0}
+  button.primary{width:100%;background:#E8593C;color:#fff;border:0;padding:13px 0;
+        font-size:13.5px;font-weight:bold;font-family:inherit;cursor:pointer}
+  .note{font-size:10.5px;color:#8C8C8C;text-align:center;margin-top:9px;line-height:1.5}
+  .qhead{display:flex;justify-content:space-between;align-items:baseline;
+         border-top:1px solid #ECECEC;padding-top:14px;margin-top:20px}
+  .qhead .t{font-size:12px;font-weight:bold}.qhead .n{font-size:11px;color:#8C8C8C}
+  .qitem{display:flex;justify-content:space-between;padding:9px 0;
+         border-bottom:1px solid #F2F2F2;font-size:11.5px}
+  .qitem em{font-style:normal;color:#8C8C8C;display:block;font-size:10.5px;margin-top:2px}
+  .qitem .r{color:#8C8C8C;font-size:10.5px;white-space:nowrap;padding-left:10px}
+  .empty{font-size:11.5px;color:#8C8C8C;padding:10px 0}
+  .devbar{border-top:1px solid #ECECEC;margin-top:24px;padding-top:14px}
+  .devbar .t{font-size:10px;font-weight:bold;color:#8C8C8C;letter-spacing:.6px;
+             text-transform:uppercase;margin-bottom:9px}
+  .devbar button{width:100%;padding:10px 0;font-size:12px;border:1px solid #DFDFDF;
+                 background:#fff;font-family:inherit;cursor:pointer;margin-bottom:8px}
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand">FloodAid</div>
+    <div class="who">Volunteer &middot; field report</div>
+  </header>
+
+  <div id="status"><span><span class="dot"></span><span id="statusText">Checking…</span></span>
+    <span class="q" id="queueCount">0 waiting</span></div>
+
+  <main>
+    <div class="eyebrow">New report</div>
+
+    <label for="text">What is happening</label>
+    <textarea id="text" placeholder="Describe what you can see"></textarea>
+
+    <div class="two">
+      <div>
+        <label for="people">People</label>
+        <input id="people" type="number" inputmode="numeric" placeholder="0">
+      </div>
+      <div>
+        <label for="water">Water level</label>
+        <select id="water">
+          <option value="">Not sure</option>
+          <option value="ankle">Ankle deep</option>
+          <option value="knee">Knee deep</option>
+          <option value="waist">Waist deep</option>
+          <option value="above">Above waist</option>
+        </select>
+      </div>
+    </div>
+
+    <label>Road still passable</label>
+    <div class="chips" id="road">
+      <button data-v="yes">Yes</button>
+      <button data-v="no">No</button>
+      <button data-v="unknown" class="on">Not sure</button>
+    </div>
+
+    <div class="checks">
+      <label><input type="checkbox" id="injured"> Someone injured</label>
+      <label><input type="checkbox" id="vuln"> Children or elderly</label>
+      <label><input type="checkbox" id="rising"> Water rising</label>
+    </div>
+
+    <label for="photos">Photos</label>
+    <input id="photos" type="file" accept="image/*" multiple>
+
+    <button class="primary" id="save">Save report</button>
+    <div class="note">Saved on this phone. It will upload on its own<br>when a signal is found.</div>
+
+    <div class="qhead"><span class="t">Waiting to upload</span>
+      <span class="n" id="queueSummary">nothing waiting</span></div>
+    <div id="queueList"><div class="empty">Nothing waiting. Everything has reached the control room.</div></div>
+
+    <div class="devbar">
+      <div class="t">Demo controls</div>
+      <button id="fakeOffline">Simulate going offline</button>
+      <button id="forceSync">Force sync now</button>
+    </div>
+  </main>
+
+<script type="module">
+import { saveReport, trySync, queueSummary } from "./outbox.js";
+
+const $ = id => document.getElementById(id);
+let road = "unknown";
+let forcedOffline = false;
+
+// road chips
+document.querySelectorAll("#road button").forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll("#road button").forEach(x => x.classList.remove("on"));
+    b.classList.add("on");
+    road = b.dataset.v;
+  };
+});
+
+// Ask for a location once, but never block saving on it.
+let coords = { lat: null, lon: null, acc: 1.0 };
+if (navigator.geolocation) {
+  navigator.geolocation.getCurrentPosition(
+    p => { coords = { lat: p.coords.latitude, lon: p.coords.longitude,
+                      acc: p.coords.accuracy < 50 ? 1.0 : 0.6 }; },
+    () => {}, { timeout: 5000 }
+  );
+}
+
+$("save").onclick = async () => {
+  const files = Array.from($("photos").files || []);
+  await saveReport({
+    text: $("text").value.trim(),
+    people_count: $("people").value ? parseInt($("people").value, 10) : null,
+    water_level: $("water").value || null,
+    road_passable: road,
+    injured: $("injured").checked,
+    children_elderly: $("vuln").checked,
+    rising: $("rising").checked,
+    lat: coords.lat, lon: coords.lon, location_confidence: coords.acc,
+  }, files);
+
+  // clear the form
+  $("text").value = ""; $("people").value = ""; $("water").value = "";
+  $("injured").checked = $("vuln").checked = $("rising").checked = false;
+  $("photos").value = "";
+  render();
+};
+
+$("fakeOffline").onclick = () => {
+  forcedOffline = !forcedOffline;
+  // Make navigator.onLine lie, so the demo does not need airplane mode indoors.
+  Object.defineProperty(navigator, "onLine", {
+    get: () => !forcedOffline, configurable: true
+  });
+  $("fakeOffline").textContent = forcedOffline
+    ? "Simulate coming back online" : "Simulate going offline";
+  render();
+  if (!forcedOffline) trySync();
+};
+
+$("forceSync").onclick = () => trySync().then(render);
+
+async function render() {
+  const q = await queueSummary();
+  const online = navigator.onLine;
+  $("status").className = online ? "online" : "";
+  $("statusText").textContent = online
+    ? "Connected — uploading as you go"
+    : "Offline — saving to this phone";
+  $("queueCount").textContent = q.reports + " waiting";
+  $("queueSummary").textContent = q.reports
+    ? `${q.reports} reports · ${q.photos} photos` : "nothing waiting";
+
+  const list = $("queueList");
+  if (!q.items.length) {
+    list.innerHTML = '<div class="empty">Nothing waiting. Everything has reached the control room.</div>';
+    return;
+  }
+  list.innerHTML = q.items.map(r => {
+    const mins = Math.round((Date.now() - r.phone_time) / 60000);
+    const when = mins < 1 ? "just now" : mins + " min ago";
+    const label = (r.text || "Untitled report").slice(0, 42);
+    return `<div class="qitem"><span>${label}
+      <em>Text ready · ${r.photo_ids.length} photos${r._attempts ? " · " + r._attempts + " attempts" : ""}</em></span>
+      <span class="r">${when}</span></div>`;
+  }).join("");
+}
+
+window.addEventListener("floodaid:synced", render);
+window.addEventListener("online", render);
+window.addEventListener("offline", render);
+render();
+setInterval(render, 5000);
+</script>
+</body>
+</html>
