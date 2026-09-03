@@ -64,3 +64,18 @@ Keep these in mind, they will come up in Q&A:
 6. dispatch with capacity and return legs
 7. drone polygon ingest
 8. polish
+
+## Languages
+
+The interface runs in English, Assamese, Bengali and Hindi. All strings are
+in `web/i18n.js` and ship inside the app, so switching language works with
+no network — there is no translation service to call during a flood.
+
+**Before the demo:** the Assamese, Bengali and Hindi strings were written
+without a native speaker. Get one to read every line, fix what is wrong,
+then set that language to `true` in `VERIFIED` at the top of the file.
+Until you do, the app shows a strip saying the translation is unchecked.
+Leave that strip in — a wrong word on "road passable" is worse than English.
+
+Report *text* is separate from interface language. People write in whatever
+mix they use, and the server extraction handles it.
