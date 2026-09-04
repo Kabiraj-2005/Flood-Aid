@@ -21,7 +21,7 @@ from pathlib import Path
 from . import db
 from .severity import compute_severity, explain
 from .danger import build_danger_map
-from .routing import route_to_safety
+from .routing import route_to_safety, apply_zones
 
 app = FastAPI(title="FloodAid")
 
@@ -288,6 +288,42 @@ def _road_graph():
         from .fakedata import grid_town
         _GRAPH = grid_town()
     return _GRAPH
+
+
+@app.get("/api/roads")
+def roads():
+    """
+    The road network the router actually runs on, plus which edges the
+    current danger map removes or penalises.
+
+    control.html used to keep its own hardcoded copy of grid_town() to draw
+    the map. That drifts the moment either copy changes, and shows routes
+    that appear to leave the road network. This is the same graph
+    _road_graph() builds, so the map always matches what /api/route uses.
+
+    blocked/penalised come from apply_zones() — the same function
+    find_route() calls — instead of the map re-deriving them client-side.
+    A second, JS copy of the zone-vs-edge geometry would drift from
+    routing.py the moment either one changed, and the map would show a road
+    as open that the router has already removed.
+    """
+    graph = _road_graph()
+    if graph is None:
+        return {"nodes": {}, "edges": [], "blocked": [], "penalised": []}
+
+    conn = db.connect()
+    reports = [db.row_to_dict(r) for r in
+               conn.execute("SELECT * FROM reports").fetchall()]
+    conn.close()
+    danger = build_danger_map(reports)["zones"]
+    blocked, penalties, _why = apply_zones(graph, danger)
+
+    return {
+        "nodes": {nid: [lat, lon] for nid, (lat, lon) in graph.nodes.items()},
+        "edges": [[a, b] for (a, b) in graph.edge_meta.keys()],
+        "blocked": [[a, b] for (a, b) in blocked],
+        "penalised": [[a, b] for (a, b) in penalties.keys()],
+    }
 
 
 @app.get("/api/health")

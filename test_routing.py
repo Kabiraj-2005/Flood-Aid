@@ -14,6 +14,7 @@ from backend import fakedata
 from backend.danger import build_danger_map, haversine_m
 from backend.routing import (
     find_route, route_to_safety, apply_zones, _segment_hits_circle,
+    _segment_point_distance_m,
 )
 
 NOW = 1_770_000_000_000          # pinned, so decay maths is identical every run
@@ -47,6 +48,43 @@ mid = (26.2505, 92.3500)          # ~55 m off the middle of the line
 assert _segment_hits_circle(a, b, mid, 100)
 assert haversine_m(*a, *mid) > 200 and haversine_m(*b, *mid) > 200
 ok("detects a zone sitting over the middle of a long road, not just its ends")
+
+# A previous control-room bug drew zone circles at one radius but blocked
+# roads as if they were much bigger — the map looked like nearly every road
+# was underwater. apply_zones must never reach further than a zone's own
+# (rendered) radius_m, with some margin for the segment geometry, not some
+# other constant.
+print("\napply_zones never blocks a road far from every zone's own radius")
+g = fakedata.grid_town()
+zones = [
+    {"cluster_id": "z-a", "lat": g.nodes["1,1"][0], "lon": g.nodes["1,1"][1],
+     "radius_m": 120.0, "routing": "block"},
+    {"cluster_id": "z-b", "lat": g.nodes["4,4"][0], "lon": g.nodes["4,4"][1],
+     "radius_m": 250.0, "routing": "block"},
+    {"cluster_id": "z-c", "lat": g.nodes["7,2"][0], "lon": g.nodes["7,2"][1],
+     "radius_m": 90.0, "routing": "block"},
+]
+blocked, _, _ = apply_zones(g, zones)
+
+far_from_every_zone = near_some_zone = 0
+for key in g.edge_meta:
+    a_id, b_id = key
+    a, b = g.nodes[a_id], g.nodes[b_id]
+    distances = [_segment_point_distance_m(a, b, (z["lat"], z["lon"])) for z in zones]
+    if all(d > 2 * z["radius_m"] for d, z in zip(distances, zones)):
+        far_from_every_zone += 1
+        assert key not in blocked, (
+            f"{key} is {min(distances):.0f} m from the nearest zone centre — "
+            f"more than 2x every zone's own radius — but apply_zones blocked it anyway"
+        )
+    else:
+        near_some_zone += 1
+
+# sanity: the scene needs to actually exercise both cases or the assert above is vacuous
+assert far_from_every_zone > 0 and near_some_zone > 0
+ok(f"{far_from_every_zone} of {len(g.edge_meta)} road segments sit beyond 2x every "
+   f"zone's radius, and apply_zones left every one of them open")
+ok(f"{len(blocked)} segment(s) actually near a zone were blocked")
 
 
 # ------------------------------------------------------------ the detour

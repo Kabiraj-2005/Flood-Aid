@@ -84,13 +84,12 @@ class RoadGraph:
 
 # ------------------------------------------------------- zones vs edges
 
-def _segment_hits_circle(a, b, centre, radius_m):
+def _segment_point_distance_m(a, b, centre):
     """
-    Does the road segment a-b pass within radius_m of centre?
+    Distance in metres from the closest point on segment a-b to centre.
 
-    Closest point on a line segment to a point. We work in metres by
-    projecting onto a local flat plane, which is fine at these distances —
-    over a few kilometres the error is centimetres.
+    We work in metres by projecting onto a local flat plane, which is fine
+    at these distances — over a few kilometres the error is centimetres.
     """
     clat, clon = centre
     mlat = math.radians(clat)
@@ -104,13 +103,18 @@ def _segment_hits_circle(a, b, centre, radius_m):
 
     dx, dy = bx - ax, by - ay
     if dx == 0 and dy == 0:
-        return math.hypot(ax, ay) <= radius_m
+        return math.hypot(ax, ay)
 
     # how far along the segment the closest point sits, clamped to [0,1]
     t = -(ax * dx + ay * dy) / (dx * dx + dy * dy)
     t = max(0.0, min(1.0, t))
     px, py = ax + t * dx, ay + t * dy
-    return math.hypot(px, py) <= radius_m
+    return math.hypot(px, py)
+
+
+def _segment_hits_circle(a, b, centre, radius_m):
+    """Does the road segment a-b pass within radius_m of centre?"""
+    return _segment_point_distance_m(a, b, centre) <= radius_m
 
 
 def zones_touching_roads(graph, zones):

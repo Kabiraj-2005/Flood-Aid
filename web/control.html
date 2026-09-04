@@ -61,6 +61,9 @@
           background:rgba(255,255,255,.88);padding:8px 10px;line-height:1.7}
   #legend .row{display:flex;align-items:center;gap:6px}
   #legend .sw{width:10px;height:10px;flex:0 0 auto;display:inline-block}
+  #legend .sw-line{width:16px;height:0;flex:0 0 auto;display:inline-block;
+                   border-top:2px solid #C7C7C7}
+  #legend .sw-line.blocked{border-top:2.4px dashed #C23B2B}
   #legend .note{margin-top:5px;color:#8C8C8C;font-size:9.5px;max-width:150px}
   #mapEmpty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
             font-size:12px;color:#8C8C8C;text-align:center;padding:0 40px;pointer-events:none}
@@ -123,18 +126,16 @@
       <div id="mapWrap">
         <svg id="mapSvg" viewBox="0 0 1000 700" preserveAspectRatio="xMidYMid meet">
           <rect id="mapBg" x="0" y="0" width="1000" height="700" fill="#ffffff"></rect>
-          <g id="roadsLayer"></g>
           <g id="zonesLayer"></g>
+          <g id="roadsLayer"></g>
           <g id="reportsLayer"></g>
           <g id="routeLayer"></g>
         </svg>
         <div id="mapEmpty" style="display:none"></div>
         <div id="legend"></div>
         <div id="mapCaption">
-          Road network: synthetic 9×9 grid used by the router (backend has no
-          live road-graph endpoint to read, so this mirrors
-          backend/fakedata.py's grid_town() exactly). Click anywhere to route
-          from that point.
+          Road network loaded live from /api/roads — the same graph the
+          router uses. Click anywhere to route from that point.
         </div>
       </div>
       <div id="routeInfo"><span class="hint">Click anywhere on the map to route from that point to the nearest safe zone with space.</span></div>
@@ -179,28 +180,9 @@ async function fetchJSON(url){
 }
 
 // ------------------------------------------------------- road network
-// No endpoint exposes the live road graph (only /api/route consumes it),
-// and DATA rules say read from the given endpoints only, don't invent new
-// ones. The graph the server actually routes on is a fixed, deterministic
-// grid (backend/fakedata.py grid_town(), called with no arguments by
-// backend/main.py's _road_graph()) — so it is reproduced here exactly
-// rather than guessed at.
-const GRID = (function build(rows, cols, spacingM, baseLat, baseLon){
-  function offset(lat, lon, n, e){
-    return [lat + n / 111320.0, lon + e / (111320.0 * 0.9)];
-  }
-  const nodes = {};
-  for (let r = 0; r < rows; r++)
-    for (let c = 0; c < cols; c++)
-      nodes[r + "," + c] = offset(baseLat, baseLon, r * spacingM, c * spacingM);
-  const edges = [];
-  for (let r = 0; r < rows; r++)
-    for (let c = 0; c < cols; c++) {
-      if (c + 1 < cols) edges.push([r + "," + c, r + "," + (c + 1)]);
-      if (r + 1 < rows) edges.push([r + "," + c, (r + 1) + "," + c]);
-    }
-  return { nodes, edges };
-})(9, 9, 200, 26.2500, 92.3400);
+// Loaded from /api/roads, the same graph backend/main.py's _road_graph()
+// builds for /api/route. Drawing anything else risks the map showing a
+// route that appears to leave the road network.
 
 // ------------------------------------------------------------- danger colours
 // Danger (how bad) gets the colour. Confidence (how sure) gets opacity +
@@ -221,17 +203,24 @@ const state = {
   routeErr: null,        // network-level failure fetching the route
   routeLoading: false,
   frame: null,            // current map projection, for click -> lat/lon
+  roads: null,             // {nodes, edges} from /api/roads, null until loaded
 };
 
 // ------------------------------------------------------------------ poll
+// /api/roads' nodes/edges are static, but its blocked/penalised lists are
+// recomputed from the current danger map on every request — so roads has
+// to be polled right alongside reports/danger, or the map and the legend
+// end up describing a flood that has since moved on.
 async function poll(){
   try {
-    const [rep, dang] = await Promise.all([
+    const [rep, dang, rds] = await Promise.all([
       fetchJSON("/api/reports"),
       fetchJSON("/api/danger"),
+      fetchJSON("/api/roads"),
     ]);
     state.reports = rep.reports || [];
     state.danger = dang;
+    state.roads = rds;
     state.apiOk = true;
     state.lastFetch = Date.now();
   } catch (e) {
@@ -239,6 +228,7 @@ async function poll(){
   }
   render();
 }
+
 poll();
 setInterval(poll, 5000);
 setInterval(renderTopbar, 1000);   // keep "last updated Ns ago" honest between polls
@@ -386,7 +376,8 @@ function renderIncidents(){
 // -------------------------------------------------------------- the map
 function bboxOf(){
   const lats = [], lons = [];
-  Object.values(GRID.nodes).forEach(([la, lo]) => { lats.push(la); lons.push(lo); });
+  const roadNodes = (state.roads && state.roads.nodes) || {};
+  Object.values(roadNodes).forEach(([la, lo]) => { lats.push(la); lons.push(lo); });
 
   const zones = (state.danger && state.danger.zones) || [];
   zones.forEach(z => {
@@ -406,6 +397,8 @@ function bboxOf(){
     state.route.coordinates.forEach(([la, lo]) => { lats.push(la); lons.push(lo); });
   }
   if (state.clickLatLon) { lats.push(state.clickLatLon[0]); lons.push(state.clickLatLon[1]); }
+
+  if (lats.length === 0) { lats.push(-1, 1); lons.push(-1, 1); }   // nothing loaded yet
 
   let minLat = Math.min(...lats), maxLat = Math.max(...lats);
   let minLon = Math.min(...lons), maxLon = Math.max(...lons);
@@ -437,43 +430,64 @@ function renderMap(){
   const f = buildFrame();
   state.frame = f;
 
-  // ---- roads
-  const roadsHtml = GRID.edges.map(([a, b]) => {
-    const [alat, alon] = GRID.nodes[a], [blat, blon] = GRID.nodes[b];
-    const [x1, y1] = project(f, alat, alon), [x2, y2] = project(f, blat, blon);
-    return `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="#DADADA" stroke-width="1"/>`;
-  }).join("");
-  document.getElementById("roadsLayer").innerHTML = roadsHtml;
-
-  // ---- danger zones (colour = danger, opacity/dash = confidence)
+  const roadNodes = (state.roads && state.roads.nodes) || {};
+  const roadEdges = (state.roads && state.roads.edges) || [];
   const zones = (state.danger && state.danger.zones) || [];
+  // blocked/penalised come straight from /api/roads, which computed them by
+  // calling routing.py's apply_zones() — the same function the router
+  // itself uses. The map never re-derives this geometry client-side.
+  const blockedEdges = new Set((state.roads && state.roads.blocked || []).map(([a, b]) => a + "|" + b));
+
+  // ---- danger zones, drawn first so roads and markers sit on top of them.
+  // Fill is kept nearly transparent — the point of this map is that roads
+  // crossing water get removed, so a road under a zone must stay visible.
+  // Danger level now reads mainly from the stroke colour; confidence still
+  // reads from solid vs dashed outline, same as before.
   const zonesHtml = zones.map(z => {
     const [cx, cy] = project(f, z.lat, z.lon);
     const rr = Math.max(6, (z.radius_m / 111320.0) * f.scale);
     const color = DANGER_COLOR[z.danger] || "#8C8C8C";
     const confirmed = z.routing === "block";
-    const fillOp = Math.max(0.14, Math.min(0.62, 0.16 + z.confidence * 0.5));
+    const fillOp = 0.15 + Math.max(0, Math.min(1, z.confidence)) * 0.10; // 0.15 - 0.25
     const dash = confirmed ? "" : 'stroke-dasharray="7 5"';
-    // Detail (confidence, evidence) lives in the hover tooltip instead of a
-    // second line of on-map text — with a dozen zones on a small map, two
-    // lines each stacked below the circle collide into an unreadable mess.
-    // Only the danger level, already colour-coded, stays inline.
     const tooltip = `${z.danger_name} · ${Math.round(z.confidence * 100)}% confidence` +
       (confirmed ? "" : " (unconfirmed)") + ` — ${z.evidence}`;
+    const label = esc(z.danger_name);
+    const labelY = cy - rr - 8;
+    const halfW = Math.max(14, label.length * 3.6 + 6);
     return `<g>
       <circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${rr.toFixed(1)}"
         fill="${color}" fill-opacity="${fillOp.toFixed(2)}"
-        stroke="${color}" stroke-width="1.6" ${dash}>
+        stroke="${color}" stroke-width="2.2" ${dash}>
         <title>${esc(tooltip)}</title>
       </circle>
-      <text x="${cx.toFixed(1)}" y="${(cy + 3.5).toFixed(1)}" text-anchor="middle"
-        font-size="10.5" font-weight="bold" fill="${color}" pointer-events="none"
-        style="paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round">
-        ${esc(z.danger_name)}
+      <rect x="${(cx - halfW).toFixed(1)}" y="${(labelY - 9).toFixed(1)}"
+        width="${(halfW * 2).toFixed(1)}" height="13" rx="2"
+        fill="#fff" fill-opacity="0.82" pointer-events="none"></rect>
+      <text x="${cx.toFixed(1)}" y="${(labelY + 0.5).toFixed(1)}" text-anchor="middle"
+        font-size="10.5" font-weight="bold" fill="${color}" pointer-events="none">
+        ${label}
       </text>
     </g>`;
   }).join("");
   document.getElementById("zonesLayer").innerHTML = zonesHtml;
+
+  // ---- roads, drawn on top of zone fills but below markers/route, so a
+  // blocked road reads as visibly inside a coloured zone rather than hidden
+  // under it. Blocked segments (confirmed flooding, removed from routing)
+  // get a distinct red/dashed/faded style instead of the normal grey.
+  const roadsHtml = roadEdges.map(([a, b]) => {
+    const na = roadNodes[a], nb = roadNodes[b];
+    if (!na || !nb) return "";
+    const [x1, y1] = project(f, na[0], na[1]), [x2, y2] = project(f, nb[0], nb[1]);
+    const blocked = blockedEdges.has(a + "|" + b);
+    const style = blocked
+      ? 'stroke="#C23B2B" stroke-width="2.4" stroke-dasharray="5 4" stroke-opacity="0.85"'
+      : 'stroke="#C7C7C7" stroke-width="1"';
+    const title = blocked ? "<title>Blocked by confirmed flooding</title>" : "";
+    return `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" ${style}>${title}</line>`;
+  }).join("");
+  document.getElementById("roadsLayer").innerHTML = roadsHtml;
 
   // ---- report markers
   const reportsHtml = state.reports.filter(r => r.lat !== null && r.lat !== undefined &&
@@ -510,16 +524,38 @@ function renderMap(){
   document.getElementById("routeLayer").innerHTML = routeHtml;
 
   // ---- legend
+  // Recomputed on every renderMap() call, which runs after every poll() —
+  // state.roads.blocked is never more than one poll cycle old, so this
+  // always matches what /api/roads just returned, not some earlier seed.
+  const roadsRemovedCount = blockedEdges.size;
   document.getElementById("legend").innerHTML = `
     ${[1,2,3,4].map(d => `<div class="row"><span class="sw" style="background:${DANGER_COLOR[d]}"></span>${DANGER_LABEL[d]}</div>`).join("")}
-    <div class="note">Solid outline = confirmed. Dashed = unconfirmed (lower confidence). Opacity also tracks confidence. Areas with no reports are left blank — unknown, not safe.</div>
+    <div class="row"><span class="sw-line"></span>road</div>
+    <div class="row"><span class="sw-line blocked"></span>blocked by confirmed flooding</div>
+    <div class="note">${roadsRemovedCount} of ${roadEdges.length} roads removed. Zone fill is faint on purpose — roads stay visible through it. Solid outline = confirmed, dashed = unconfirmed. Areas with no reports are left blank — unknown, not safe.</div>
   `;
+
+  // The legend counts roads removed from the CURRENT poll's danger map; the
+  // route panel's roads_removed counts roads removed at the moment a route
+  // was last requested. They can legitimately differ for a moment right
+  // after a report changes the danger map and before the next poll lands —
+  // but a warning here is exactly how that window gets noticed instead of
+  // the two panels quietly telling the operator different stories.
+  if (state.route && state.route.found && typeof state.route.roads_removed === "number") {
+    console.assert(
+      state.route.roads_removed === roadsRemovedCount,
+      `roads-removed mismatch: legend says ${roadsRemovedCount}, route panel says ${state.route.roads_removed}`
+    );
+  }
 
   // ---- empty overlay
   const emptyEl = document.getElementById("mapEmpty");
   if (state.apiOk === false && !state.lastFetch) {
     emptyEl.style.display = "flex";
     emptyEl.textContent = "Cannot reach the server.";
+  } else if (!state.roads) {
+    emptyEl.style.display = "flex";
+    emptyEl.textContent = "Loading road network…";
   } else if (state.apiOk !== false && zones.length === 0 && state.reports.length === 0) {
     emptyEl.style.display = "flex";
     emptyEl.textContent = "No reports yet — the map has nothing to show. Road network only.";
@@ -596,11 +632,18 @@ function renderReview(){
     noteEl.textContent = "";
     return;
   }
+  // "Zones blocking roads" (stats.blocked, a zone count from /api/danger)
+  // and "Roads removed" (a road-segment count from /api/roads.blocked) are
+  // different units. Naming them separately keeps them from reading as the
+  // same number disagreeing, which is what "Blocked" next to the roads
+  // legend used to look like.
+  const roadsRemoved = (state.roads && state.roads.blocked && state.roads.blocked.length) || 0;
   const rows = [
     ["Reports", stats.reports],
     ["Clusters", stats.clusters],
     ["Zones drawn", stats.zones_drawn],
-    ["Blocked", stats.blocked],
+    ["Zones blocking roads", stats.blocked],
+    ["Roads removed", roadsRemoved],
     ["Expensive", stats.expensive],
     ["Held", stats.held_for_review],
   ];

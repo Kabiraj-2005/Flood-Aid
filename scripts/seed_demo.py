@@ -160,12 +160,14 @@ def main():
         description="Seed a running FloodAid server with a demo scene.")
     ap.add_argument("--url", default="http://localhost:8000",
                      help="base URL of the running server")
-    ap.add_argument("--n", type=int, default=120, help="number of reports")
-    ap.add_argument("--incidents", type=int, default=5,
-                     help="hidden true incidents (kept low: grid_town's default "
-                          "grid is only ~1.6 km square, and each zone typically "
-                          "covers 200-300 m — too many incidents flood every road "
-                          "on it and there's nothing left to route around)")
+    ap.add_argument("--n", type=int, default=240, help="number of reports")
+    ap.add_argument("--incidents", type=int, default=12,
+                     help="hidden true incidents (scene_realistic()'s own default). "
+                          "On grid_town's ~1.6 km square demo grid this floods "
+                          "most of the network — expect danger-aware routing to "
+                          "find a path from only a minority of start points. Pass "
+                          "a lower --incidents for a demo where routing succeeds "
+                          "more often")
     ap.add_argument("--seed", type=int, default=2026)
     ap.add_argument("--accuracy", type=float, default=0.82,
                      help="probability an observation matches the hidden truth")
