@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FloodAid — control room</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%}
+  body{font-family:Arial,Helvetica,sans-serif;color:#1C1C1C;background:#fff;
+       display:flex;flex-direction:column;overflow:hidden}
+
+  /* ---------------------------------------------------------- topbar */
+  #topbar{display:flex;justify-content:space-between;align-items:center;
+          padding:11px 20px;border-bottom:1px solid #ECECEC;flex:0 0 auto}
+  #topbar .left{display:flex;align-items:baseline;gap:9px}
+  #topbar .brand{font-size:15px;font-weight:bold}
+  #topbar .sub{font-size:11px;color:#8C8C8C}
+  #topbar .right{display:flex;align-items:center;gap:16px;font-size:11px;color:#8C8C8C}
+  .dot{width:7px;height:7px;border-radius:50%;background:#E8593C;display:inline-block;
+       margin-right:6px;vertical-align:1px}
+  .dot.ok{background:#2E9B99}
+
+  #apiBanner{flex:0 0 auto;background:#E8593C;color:#fff;font-size:11.5px;
+             padding:7px 20px;display:none}
+  #apiBanner.show{display:block}
+
+  /* ---------------------------------------------------------- layout */
+  #layout{flex:1 1 auto;display:flex;min-height:0}
+  .col{overflow-y:auto}
+  .col-head{font-size:10px;font-weight:bold;color:#E8593C;letter-spacing:.6px;
+            text-transform:uppercase;padding:12px 16px 8px}
+  .empty{font-size:11.5px;color:#8C8C8C;padding:14px 16px}
+
+  /* ---------------------------------------------------------- incidents */
+  #incidents{width:350px;flex:0 0 350px;border-right:1px solid #ECECEC}
+  .inc-row{padding:10px 16px;border-bottom:1px solid #F2F2F2;cursor:pointer;font-size:12px}
+  .inc-row:hover{background:#FAFAFA}
+  .inc-row.active{border-left:3px solid #E8593C;padding-left:13px;background:#FAFAFA}
+  .inc-top{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+  .inc-id{font-weight:bold;font-size:11.5px}
+  .inc-sev{color:#E8593C;font-weight:bold;font-size:11.5px;white-space:nowrap}
+  .inc-text{margin-top:3px;font-size:11.5px;color:#1C1C1C;
+            overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .inc-meta{margin-top:4px;font-size:10.5px;color:#8C8C8C;display:flex;gap:10px;flex-wrap:wrap}
+  .why{margin-top:8px;padding-top:8px;border-top:1px solid #ECECEC;font-size:11px}
+  .why .total{font-weight:bold;margin-bottom:5px}
+  .why ul{list-style:none}
+  .why li{padding:2px 0;color:#1C1C1C}
+  .why li:before{content:"— "}
+  .why .none{color:#8C8C8C}
+
+  /* ---------------------------------------------------------- map */
+  #mapCol{flex:1 1 auto;display:flex;flex-direction:column;min-width:0}
+  #mapWrap{flex:1 1 auto;position:relative;min-height:0;border-right:1px solid #ECECEC}
+  #mapSvg{width:100%;height:100%;display:block;cursor:crosshair}
+  #mapCaption{position:absolute;left:12px;bottom:10px;font-size:9.5px;color:#8C8C8C;
+              max-width:60%;line-height:1.4;pointer-events:none}
+  #legend{position:absolute;top:12px;right:12px;font-size:10px;color:#1C1C1C;
+          background:rgba(255,255,255,.88);padding:8px 10px;line-height:1.7}
+  #legend .row{display:flex;align-items:center;gap:6px}
+  #legend .sw{width:10px;height:10px;flex:0 0 auto;display:inline-block}
+  #legend .note{margin-top:5px;color:#8C8C8C;font-size:9.5px;max-width:150px}
+  #mapEmpty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+            font-size:12px;color:#8C8C8C;text-align:center;padding:0 40px;pointer-events:none}
+
+  #routeInfo{flex:0 0 auto;max-height:180px;overflow-y:auto;border-top:1px solid #ECECEC;
+             padding:12px 20px;font-size:11.5px}
+  #routeInfo .hint{color:#8C8C8C}
+  #routeInfo .title{font-weight:bold;margin-bottom:5px}
+  #routeInfo .line{margin-top:3px}
+  #routeInfo .grey{color:#8C8C8C}
+  #routeInfo .bad{color:#E8593C;font-weight:bold}
+  #routeInfo .ok{color:#2E9B99;font-weight:bold}
+
+  /* ---------------------------------------------------------- review */
+  #review{width:320px;flex:0 0 320px;border-left:1px solid #ECECEC}
+  .held-item{padding:10px 16px;border-bottom:1px solid #F2F2F2;font-size:11.5px}
+  .held-item .rid{font-weight:bold}
+  .held-item .claim{margin-top:4px}
+  .held-item .claim b{color:#1C1C1C}
+  .held-reason{color:#8C8C8C;font-size:10.5px;margin-top:5px;line-height:1.4}
+  .held-btns{display:flex;gap:8px;margin-top:8px}
+  .held-btns button{flex:1;padding:6px 0;font-size:10px;border:1px solid #DFDFDF;
+                    background:#fff;font-family:inherit;cursor:pointer;color:#1C1C1C}
+  .held-btns button:hover{border-color:#1C1C1C}
+
+  #stats{padding:4px 16px 16px}
+  .stat-row{display:flex;justify-content:space-between;padding:6px 0;
+            border-bottom:1px solid #F2F2F2;font-size:11.5px}
+  .stat-row .k{color:#8C8C8C}
+  .stat-row .v{font-weight:bold}
+  #unknownNote{padding:10px 16px 4px;font-size:10.5px;color:#8C8C8C;font-style:italic;
+               line-height:1.4}
+
+  /* scrollbars stay native/minimal — no styling needed */
+</style>
+</head>
+<body>
+
+  <div id="topbar">
+    <div class="left">
+      <span class="brand">FloodAid</span>
+      <span class="sub">Control room</span>
+    </div>
+    <div class="right">
+      <span id="lastUpdated">loading…</span>
+      <span><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></span>
+    </div>
+  </div>
+
+  <div id="apiBanner"></div>
+
+  <div id="layout">
+
+    <div id="incidents" class="col">
+      <div class="col-head">Incidents</div>
+      <div id="incList"></div>
+    </div>
+
+    <div id="mapCol">
+      <div id="mapWrap">
+        <svg id="mapSvg" viewBox="0 0 1000 700" preserveAspectRatio="xMidYMid meet">
+          <rect id="mapBg" x="0" y="0" width="1000" height="700" fill="#ffffff"></rect>
+          <g id="roadsLayer"></g>
+          <g id="zonesLayer"></g>
+          <g id="reportsLayer"></g>
+          <g id="routeLayer"></g>
+        </svg>
+        <div id="mapEmpty" style="display:none"></div>
+        <div id="legend"></div>
+        <div id="mapCaption">
+          Road network: synthetic 9×9 grid used by the router (backend has no
+          live road-graph endpoint to read, so this mirrors
+          backend/fakedata.py's grid_town() exactly). Click anywhere to route
+          from that point.
+        </div>
+      </div>
+      <div id="routeInfo"><span class="hint">Click anywhere on the map to route from that point to the nearest safe zone with space.</span></div>
+    </div>
+
+    <div id="review" class="col">
+      <div class="col-head">Review queue</div>
+      <div id="heldList"></div>
+      <div class="col-head">Stats</div>
+      <div id="stats"></div>
+      <div id="unknownNote"></div>
+    </div>
+
+  </div>
+
+<script>
+"use strict";
+
+// ------------------------------------------------------------ helpers
+
+function esc(s){
+  if (s === null || s === undefined) return "";
+  return String(s).replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[c]));
+}
+
+function ageStr(ms){
+  if (ms === null || ms === undefined) return "—";
+  const mins = Math.round((Date.now() - ms) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return mins + "m ago";
+  const hrs = mins / 60;
+  if (hrs < 48) return hrs.toFixed(1) + "h ago";
+  return (hrs / 24).toFixed(1) + "d ago";
+}
+
+async function fetchJSON(url){
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(url + " -> HTTP " + r.status);
+  return r.json();
+}
+
+// ------------------------------------------------------- road network
+// No endpoint exposes the live road graph (only /api/route consumes it),
+// and DATA rules say read from the given endpoints only, don't invent new
+// ones. The graph the server actually routes on is a fixed, deterministic
+// grid (backend/fakedata.py grid_town(), called with no arguments by
+// backend/main.py's _road_graph()) — so it is reproduced here exactly
+// rather than guessed at.
+const GRID = (function build(rows, cols, spacingM, baseLat, baseLon){
+  function offset(lat, lon, n, e){
+    return [lat + n / 111320.0, lon + e / (111320.0 * 0.9)];
+  }
+  const nodes = {};
+  for (let r = 0; r < rows; r++)
+    for (let c = 0; c < cols; c++)
+      nodes[r + "," + c] = offset(baseLat, baseLon, r * spacingM, c * spacingM);
+  const edges = [];
+  for (let r = 0; r < rows; r++)
+    for (let c = 0; c < cols; c++) {
+      if (c + 1 < cols) edges.push([r + "," + c, r + "," + (c + 1)]);
+      if (r + 1 < rows) edges.push([r + "," + c, (r + 1) + "," + c]);
+    }
+  return { nodes, edges };
+})(9, 9, 200, 26.2500, 92.3400);
+
+// ------------------------------------------------------------- danger colours
+// Danger (how bad) gets the colour. Confidence (how sure) gets opacity +
+// dashed/solid outline. The two are never merged into one channel.
+const DANGER_COLOR = { 1: "#E8B23C", 2: "#E8593C", 3: "#C23B2B", 4: "#7A1F1F" };
+const DANGER_LABEL = { 1: "caution", 2: "restricted", 3: "severe", 4: "red" };
+
+// ------------------------------------------------------------------ state
+const state = {
+  reports: [],
+  danger: null,
+  apiOk: null,          // null = never fetched yet
+  lastFetch: 0,
+  selectedId: null,
+  whyById: {},
+  clickLatLon: null,
+  route: null,           // last /api/route response
+  routeErr: null,        // network-level failure fetching the route
+  routeLoading: false,
+  frame: null,            // current map projection, for click -> lat/lon
+};
+
+// ------------------------------------------------------------------ poll
+async function poll(){
+  try {
+    const [rep, dang] = await Promise.all([
+      fetchJSON("/api/reports"),
+      fetchJSON("/api/danger"),
+    ]);
+    state.reports = rep.reports || [];
+    state.danger = dang;
+    state.apiOk = true;
+    state.lastFetch = Date.now();
+  } catch (e) {
+    state.apiOk = false;
+  }
+  render();
+}
+poll();
+setInterval(poll, 5000);
+setInterval(renderTopbar, 1000);   // keep "last updated Ns ago" honest between polls
+
+// -------------------------------------------------------------- routing
+async function requestRoute(lat, lon){
+  state.clickLatLon = [lat, lon];
+  state.route = null;
+  state.routeErr = null;
+  state.routeLoading = true;
+  render();
+  try {
+    const r = await fetchJSON(`/api/route?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`);
+    state.route = r;
+  } catch (e) {
+    state.routeErr = "Could not reach /api/route.";
+  }
+  state.routeLoading = false;
+  render();
+}
+
+const mapSvg = document.getElementById("mapSvg");
+mapSvg.addEventListener("click", (e) => {
+  const f = state.frame;
+  if (!f) return;
+  const pt = mapSvg.createSVGPoint();
+  pt.x = e.clientX; pt.y = e.clientY;
+  const p = pt.matrixTransform(mapSvg.getScreenCTM().inverse());
+  const lon = f.bbox.minLon + (p.x - f.offX) / f.scale;
+  const lat = f.bbox.maxLat - (p.y - f.offY) / f.scale;
+  requestRoute(lat, lon);
+});
+
+// ------------------------------------------------------------ selection
+async function selectReport(id){
+  if (state.selectedId === id) { state.selectedId = null; render(); return; }
+  state.selectedId = id;
+  render();
+  if (!state.whyById[id]) {
+    try {
+      state.whyById[id] = await fetchJSON(`/api/reports/${encodeURIComponent(id)}/why`);
+    } catch (e) {
+      state.whyById[id] = { error: "could not reach the server" };
+    }
+    render();
+  }
+}
+window.selectReport = selectReport;
+
+// ---------------------------------------------------------------- render
+function render(){
+  renderTopbar();
+  renderIncidents();
+  renderMap();
+  renderReview();
+}
+
+function renderTopbar(){
+  const dot = document.getElementById("statusDot");
+  const txt = document.getElementById("statusText");
+  const upd = document.getElementById("lastUpdated");
+  const banner = document.getElementById("apiBanner");
+
+  if (state.apiOk === null) {
+    dot.className = "dot"; txt.textContent = "connecting";
+    upd.textContent = "";
+  } else if (state.apiOk) {
+    dot.className = "dot ok"; txt.textContent = "connected";
+  } else {
+    dot.className = "dot"; txt.textContent = "unreachable";
+  }
+
+  if (state.lastFetch) {
+    const secs = Math.round((Date.now() - state.lastFetch) / 1000);
+    upd.textContent = "last updated " + secs + "s ago";
+  } else {
+    upd.textContent = "";
+  }
+
+  if (state.apiOk === false) {
+    banner.className = "show";
+    banner.textContent = state.lastFetch
+      ? "Can't reach the server right now — showing data from " +
+        Math.round((Date.now() - state.lastFetch) / 1000) + "s ago. Retrying every 5s."
+      : "Can't reach the server. Retrying every 5s.";
+  } else {
+    banner.className = "";
+  }
+}
+
+function renderIncidents(){
+  const el = document.getElementById("incList");
+
+  if (state.apiOk === false && state.reports.length === 0) {
+    el.innerHTML = '<div class="empty">Server unreachable — no incidents to show.</div>';
+    return;
+  }
+  if (state.apiOk === null) {
+    el.innerHTML = '<div class="empty">Loading…</div>';
+    return;
+  }
+  if (state.reports.length === 0) {
+    el.innerHTML = '<div class="empty">No reports yet.</div>';
+    return;
+  }
+
+  el.innerHTML = state.reports.map(r => {
+    const active = state.selectedId === r.id;
+    const text = r.text ? esc(r.text) : '<span style="color:#8C8C8C">(no text)</span>';
+    const people = (r.people_count === null || r.people_count === undefined) ? "—" : r.people_count;
+    let whyHtml = "";
+    if (active) {
+      const w = state.whyById[r.id];
+      if (!w) {
+        whyHtml = '<div class="why">loading…</div>';
+      } else if (w.error) {
+        whyHtml = '<div class="why">could not load breakdown</div>';
+      } else {
+        const items = (w.because || []).map(b => `<li>${esc(b)}</li>`).join("");
+        whyHtml = `<div class="why">
+          <div class="total">severity ${esc(w.severity)}</div>
+          ${items ? `<ul>${items}</ul>` : '<div class="none">no contributing factors</div>'}
+        </div>`;
+      }
+    }
+    return `<div class="inc-row ${active ? "active" : ""}" onclick="selectReport('${esc(r.id).replace(/'/g, "\\'")}')">
+      <div class="inc-top">
+        <span class="inc-id">${esc(r.id)}</span>
+        <span class="inc-sev">sev ${esc(r.severity)}</span>
+      </div>
+      <div class="inc-text">${text}</div>
+      <div class="inc-meta">
+        <span>${ageStr(r.reported_at)}</span>
+        <span>${esc(r.water_level || "level unknown")}</span>
+        <span>${people} people</span>
+      </div>
+      ${whyHtml}
+    </div>`;
+  }).join("");
+}
+
+// -------------------------------------------------------------- the map
+function bboxOf(){
+  const lats = [], lons = [];
+  Object.values(GRID.nodes).forEach(([la, lo]) => { lats.push(la); lons.push(lo); });
+
+  const zones = (state.danger && state.danger.zones) || [];
+  zones.forEach(z => {
+    const dLat = z.radius_m / 111320.0;
+    const dLon = z.radius_m / (111320.0 * Math.cos(z.lat * Math.PI / 180));
+    lats.push(z.lat - dLat, z.lat + dLat);
+    lons.push(z.lon - dLon, z.lon + dLon);
+  });
+
+  state.reports.forEach(r => {
+    if (r.lat !== null && r.lat !== undefined && r.lon !== null && r.lon !== undefined) {
+      lats.push(r.lat); lons.push(r.lon);
+    }
+  });
+
+  if (state.route && state.route.found) {
+    state.route.coordinates.forEach(([la, lo]) => { lats.push(la); lons.push(lo); });
+  }
+  if (state.clickLatLon) { lats.push(state.clickLatLon[0]); lons.push(state.clickLatLon[1]); }
+
+  let minLat = Math.min(...lats), maxLat = Math.max(...lats);
+  let minLon = Math.min(...lons), maxLon = Math.max(...lons);
+  if (minLat === maxLat) { minLat -= 0.001; maxLat += 0.001; }
+  if (minLon === maxLon) { minLon -= 0.001; maxLon += 0.001; }
+  return { minLat, maxLat, minLon, maxLon };
+}
+
+function buildFrame(){
+  const W = 1000, H = 700, pad = 46;
+  const bbox = bboxOf();
+  const scaleX = (W - 2 * pad) / (bbox.maxLon - bbox.minLon);
+  const scaleY = (H - 2 * pad) / (bbox.maxLat - bbox.minLat);
+  const scale = Math.min(scaleX, scaleY);
+  const usedW = (bbox.maxLon - bbox.minLon) * scale;
+  const usedH = (bbox.maxLat - bbox.minLat) * scale;
+  const offX = pad + ((W - 2 * pad) - usedW) / 2;
+  const offY = pad + ((H - 2 * pad) - usedH) / 2;
+  return { W, H, pad, bbox, scale, offX, offY };
+}
+
+function project(f, lat, lon){
+  const x = f.offX + (lon - f.bbox.minLon) * f.scale;
+  const y = f.offY + (f.bbox.maxLat - lat) * f.scale;
+  return [x, y];
+}
+
+function renderMap(){
+  const f = buildFrame();
+  state.frame = f;
+
+  // ---- roads
+  const roadsHtml = GRID.edges.map(([a, b]) => {
+    const [alat, alon] = GRID.nodes[a], [blat, blon] = GRID.nodes[b];
+    const [x1, y1] = project(f, alat, alon), [x2, y2] = project(f, blat, blon);
+    return `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="#DADADA" stroke-width="1"/>`;
+  }).join("");
+  document.getElementById("roadsLayer").innerHTML = roadsHtml;
+
+  // ---- danger zones (colour = danger, opacity/dash = confidence)
+  const zones = (state.danger && state.danger.zones) || [];
+  const zonesHtml = zones.map(z => {
+    const [cx, cy] = project(f, z.lat, z.lon);
+    const rr = Math.max(6, (z.radius_m / 111320.0) * f.scale);
+    const color = DANGER_COLOR[z.danger] || "#8C8C8C";
+    const confirmed = z.routing === "block";
+    const fillOp = Math.max(0.14, Math.min(0.62, 0.16 + z.confidence * 0.5));
+    const dash = confirmed ? "" : 'stroke-dasharray="7 5"';
+    const labelY1 = cy + rr + 13;
+    const labelY2 = cy + rr + 25;
+    return `<g>
+      <circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${rr.toFixed(1)}"
+        fill="${color}" fill-opacity="${fillOp.toFixed(2)}"
+        stroke="${color}" stroke-width="1.6" ${dash}></circle>
+      <text x="${cx.toFixed(1)}" y="${labelY1.toFixed(1)}" text-anchor="middle"
+        font-size="10.5" font-weight="bold" fill="${color}"
+        style="paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round">
+        ${esc(z.danger_name)} · ${Math.round(z.confidence * 100)}% conf${confirmed ? "" : " (unconfirmed)"}
+      </text>
+      <text x="${cx.toFixed(1)}" y="${labelY2.toFixed(1)}" text-anchor="middle"
+        font-size="9" fill="#1C1C1C"
+        style="paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round">
+        ${esc(z.evidence)}
+      </text>
+    </g>`;
+  }).join("");
+  document.getElementById("zonesLayer").innerHTML = zonesHtml;
+
+  // ---- report markers
+  const reportsHtml = state.reports.filter(r => r.lat !== null && r.lat !== undefined &&
+                                                 r.lon !== null && r.lon !== undefined)
+    .map(r => {
+      const [x, y] = project(f, r.lat, r.lon);
+      const title = esc(`${r.id} — ${r.text || "(no text)"}`);
+      return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3"
+        fill="#1C1C1C" stroke="#fff" stroke-width="1"><title>${title}</title></circle>`;
+    }).join("");
+  document.getElementById("reportsLayer").innerHTML = reportsHtml;
+
+  // ---- route, drawn last / on top
+  let routeHtml = "";
+  if (state.clickLatLon) {
+    const [cx, cy] = project(f, state.clickLatLon[0], state.clickLatLon[1]);
+    routeHtml += `<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="5"
+      fill="none" stroke="#1C1C1C" stroke-width="2"></circle>`;
+  }
+  if (state.route && state.route.found) {
+    const pts = state.route.coordinates.map(([la, lo]) => project(f, la, lo).map(v => v.toFixed(1)).join(",")).join(" ");
+    const uncertain = state.route.confidence === "uncertain";
+    routeHtml += `<polyline points="${pts}" fill="none" stroke="#2E9B99" stroke-width="3.2"
+      ${uncertain ? 'stroke-dasharray="9 6"' : ""} stroke-linecap="round" stroke-linejoin="round"></polyline>`;
+    const dest = state.route.destination;
+    if (dest) {
+      const [dx, dy] = project(f, dest.lat, dest.lon);
+      routeHtml += `<circle cx="${dx.toFixed(1)}" cy="${dy.toFixed(1)}" r="6"
+        fill="#2E9B99" stroke="#fff" stroke-width="1.5"></circle>
+        <text x="${dx.toFixed(1)}" y="${(dy - 10).toFixed(1)}" text-anchor="middle" font-size="10" font-weight="bold"
+          fill="#2E9B99" style="paint-order:stroke;stroke:#fff;stroke-width:3px">${esc(dest.name || dest.id)}</text>`;
+    }
+  }
+  document.getElementById("routeLayer").innerHTML = routeHtml;
+
+  // ---- legend
+  document.getElementById("legend").innerHTML = `
+    ${[1,2,3,4].map(d => `<div class="row"><span class="sw" style="background:${DANGER_COLOR[d]}"></span>${DANGER_LABEL[d]}</div>`).join("")}
+    <div class="note">Solid outline = confirmed. Dashed = unconfirmed (lower confidence). Opacity also tracks confidence. Areas with no reports are left blank — unknown, not safe.</div>
+  `;
+
+  // ---- empty overlay
+  const emptyEl = document.getElementById("mapEmpty");
+  if (state.apiOk === false && !state.lastFetch) {
+    emptyEl.style.display = "flex";
+    emptyEl.textContent = "Cannot reach the server.";
+  } else if (state.apiOk !== false && zones.length === 0 && state.reports.length === 0) {
+    emptyEl.style.display = "flex";
+    emptyEl.textContent = "No reports yet — the map has nothing to show. Road network only.";
+  } else {
+    emptyEl.style.display = "none";
+  }
+
+  renderRouteInfo();
+}
+
+function renderRouteInfo(){
+  const el = document.getElementById("routeInfo");
+  if (state.routeLoading) {
+    el.innerHTML = '<span class="hint">Finding a route…</span>';
+    return;
+  }
+  if (state.routeErr) {
+    el.innerHTML = `<div class="title">Route</div><div class="line bad">${esc(state.routeErr)}</div>`;
+    return;
+  }
+  if (!state.route) {
+    el.innerHTML = '<span class="hint">Click anywhere on the map to route from that point to the nearest safe zone with space.</span>';
+    return;
+  }
+  const r = state.route;
+  if (!r.found) {
+    el.innerHTML = `<div class="title">No route</div>
+      <div class="line bad">${esc(r.reason)}</div>
+      ${r.blocked_edges !== undefined ? `<div class="line grey">${r.blocked_edges} road segments blocked by confirmed flooding</div>` : ""}
+      ${r.danger_zones_considered !== undefined ? `<div class="line grey">${r.danger_zones_considered} danger zone(s) considered</div>` : ""}`;
+    return;
+  }
+  const uncertain = r.confidence === "uncertain";
+  el.innerHTML = `<div class="title">Route to ${esc((r.destination && (r.destination.name || r.destination.id)) || "safe zone")}</div>
+    <div class="line">${r.distance_m >= 1000 ? (r.distance_m/1000).toFixed(2)+" km" : r.distance_m.toFixed(0)+" m"}
+      · ${r.travel_minutes.toFixed(1)} min · mode: ${esc(r.mode)}
+      · <span class="${uncertain ? "bad" : "ok"}">${esc(r.confidence)}</span></div>
+    <div class="line grey">${esc(r.evidence)}</div>
+    ${r.crosses_uncertain && r.crosses_uncertain.length ? `<div class="line grey">crosses: ${r.crosses_uncertain.map(z => esc(z.cluster_id + " (" + z.danger + ", " + z.age_hours + "h)")).join(", ")}</div>` : ""}
+    <div class="line grey">snapped ${r.snapped_m} m to nearest road · ${r.roads_removed} roads removed by confirmed flooding · ${r.danger_zones_considered} zone(s) considered</div>`;
+}
+
+// ------------------------------------------------------------- review col
+function renderReview(){
+  const heldEl = document.getElementById("heldList");
+  const held = (state.danger && state.danger.held) || [];
+
+  if (state.apiOk === null) {
+    heldEl.innerHTML = '<div class="empty">Loading…</div>';
+  } else if (held.length === 0) {
+    heldEl.innerHTML = '<div class="empty">Nothing held for review.</div>';
+  } else {
+    heldEl.innerHTML = held.map(h => {
+      const claims = h.claims ? esc(h.claims) : "—";
+      const groupSays = h.group_says ? esc(h.group_says) : "—";
+      const confPart = h.group_confidence ? ` (${Math.round(h.group_confidence * 100)}% group confidence)` : "";
+      return `<div class="held-item">
+        <div class="rid">${esc(h.report_id)}</div>
+        <div class="claim">claims <b>${claims}</b> — group says <b>${groupSays}</b>${confPart}</div>
+        <div class="held-reason">${esc(h.reason)}</div>
+        <div class="held-btns">
+          <button type="button">Keep the zone</button>
+          <button type="button">Accept the report</button>
+        </div>
+      </div>`;
+    }).join("");
+  }
+
+  const statsEl = document.getElementById("stats");
+  const noteEl = document.getElementById("unknownNote");
+  const stats = state.danger && state.danger.stats;
+  if (!stats) {
+    statsEl.innerHTML = '<div class="empty">—</div>';
+    noteEl.textContent = "";
+    return;
+  }
+  const rows = [
+    ["Reports", stats.reports],
+    ["Clusters", stats.clusters],
+    ["Zones drawn", stats.zones_drawn],
+    ["Blocked", stats.blocked],
+    ["Expensive", stats.expensive],
+    ["Held", stats.held_for_review],
+  ];
+  statsEl.innerHTML = rows.map(([k, v]) => `<div class="stat-row"><span class="k">${k}</span><span class="v">${esc(v)}</span></div>`).join("");
+  noteEl.textContent = stats.unknown_area || "";
+}
+</script>
+</body>
+</html>
