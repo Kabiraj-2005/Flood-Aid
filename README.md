@@ -162,9 +162,10 @@ Current results on the synthetic grid:
 
 Endpoint: `GET /api/route?lat=..&lon=..&mode=drive`
 
-The road graph is synthetic (`grid_town` in fakedata.py) so routing can be
-tested against known answers. Swapping in real OpenStreetMap data means
-replacing `_road_graph()` in main.py and nothing else.
+`grid_town` (fakedata.py) is still the correctness fixture — `test_routing.py`
+tests against it directly, unchanged, because its scenes have known answers.
+The app itself routes on real roads; see "Real roads: Morigaon district"
+below.
 
 ### Two more bugs found while building this
 
@@ -180,3 +181,79 @@ replacing `_road_graph()` in main.py and nothing else.
    Both routers optimise travel time, so time is the honest comparison.
    It is +11.1%. There is now an assertion that the figure can never be
    negative.
+
+## Real roads: Morigaon district
+
+`grid_town` was always a stand-in. The app now routes on the actual road
+network of Morigaon district, Assam — OpenStreetMap data, fetched once and
+committed, never fetched live (see CLAUDE.md: works with the network off).
+
+    python3 scripts/fetch_roads.py      # developer step, run occasionally — not at runtime
+    python3 test_osm.py                 # sanity-checks the committed extract
+
+**Fetching.** `scripts/fetch_roads.py` queries Overpass for eight highway
+types (motorway/trunk/primary/secondary/tertiary/unclassified/residential/
+track — footway/cycleway/path/service excluded) in a box centred on
+Morigaon town, and saves the raw result to `data/morigaon_roads.json`. A
+whole-district box returns ~138k nodes, well over the ~30k budget a phone
+should hold, so the script starts at a 13 km half-width and shrinks by 20%
+until the count fits:
+
+    attempt 1: half-width 13.00 km -> 35,725 nodes (too many)
+    attempt 2: half-width 10.40 km -> 24,778 nodes  (kept)
+
+**Loading.** `backend/roadloader.py`'s `load_osm(path)` turns that JSON into
+the same `RoadGraph` `grid_town()` builds, mapping OSM's `highway` tag onto
+`routing.py`'s `road_type` (motorway/trunk -> highway, primary/secondary ->
+main, tertiary/unclassified/residential -> residential, track -> track).
+`backend/main.py`'s `_road_graph()` calls it; the A* search and the
+zone-vs-edge logic in `routing.py` did not need to change at all — the only
+thing that did was `nearest_node` (below), for speed, not correctness.
+
+Real extracts are not one clean component — a driveway clipped by the
+bounding box, a footbridge digitised on its own, and a start or goal
+snapping onto one silently fails to route for a reason that has nothing to
+do with flooding. `load_osm` checks the largest connected component and
+keeps only it when that is under 90% of all nodes.
+
+    24,778 nodes, 25,192 edges, loaded in 73 ms
+    largest connected component: 23,722 of 24,778 nodes (95.7%) — above the
+    90% floor, so nothing was trimmed
+
+**Performance.** `RoadGraph.nearest_node` used to scan every node — fine at
+`grid_town`'s 81, not at 25k, and it runs once per safe zone on every
+`/api/route` call. It now buckets nodes on a ~500 m grid and expands ring by
+ring from the target bucket until the closest candidate found is provably
+closer than anything an unsearched ring could hold (not just "until a ring
+is non-empty" — real road data is uneven enough that the first non-empty
+3x3 block can still miss a genuinely closer node one ring further out).
+
+    nearest_node, 50 random points: 8.4 ms/call brute force -> 0.18-0.3 ms/call bucketed
+       (all 50 agree with brute force exactly)
+    full route_to_safety (1 start + 3 safe zones = 4 nearest_node calls
+       + A*), 20 random starts: 44.5 ms/route brute force -> 11.5 ms/route bucketed
+
+**Payload size.** `/api/roads` (nodes + edges, ~1.6 MB at this scale) does
+not change while the server is up, so the control room fetches it once. What
+*does* change every few seconds — which edges the current danger map blocks
+or penalises — is now its own endpoint, `/api/roads/blocked` (~9 KB), which
+is what the 5s poll actually re-fetches.
+
+**Seeding.** `scripts/seed_demo.py --incidents 12` (the default) places
+danger zones on real Morigaon roads instead of the old synthetic grid, and
+`verify_zones_on_roads()` still asserts at least half of them intersect an
+edge before the demo is allowed to proceed:
+
+    12 confirmed danger zone(s), 12 of them touch the road network
+    325 of 25,192 roads removed by confirmed flooding
+
+Endpoints: `GET /api/roads`, `GET /api/roads/blocked`
+
+    python3 test_osm.py
+
+Checks the extract loads non-empty, `nearest_node` agrees with brute force
+on 50 random points, a route between two random connected nodes completes
+in under 100 ms, and — the one that matters for the "routes around water"
+claim on real, non-grid geometry — dropping a danger zone on a route's
+midpoint forces a genuinely different path that crosses that zone zero
+times.

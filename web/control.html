@@ -55,14 +55,21 @@
   #mapCol{flex:1 1 auto;display:flex;flex-direction:column;min-width:0}
   #mapWrap{flex:1 1 auto;position:relative;min-height:0;border-right:1px solid #ECECEC}
   #mapSvg{width:100%;height:100%;display:block;cursor:crosshair}
+  #mapSvg.panning{cursor:grabbing}
   #mapCaption{position:absolute;left:12px;bottom:10px;font-size:9.5px;color:#8C8C8C;
               max-width:60%;line-height:1.4;pointer-events:none}
+  #mapControls{position:absolute;top:12px;left:12px;display:flex;gap:6px}
+  #mapControls button{padding:6px 10px;font-size:10.5px;border:1px solid #DFDFDF;
+                      background:rgba(255,255,255,.92);font-family:inherit;
+                      cursor:pointer;color:#1C1C1C}
+  #mapControls button:hover{border-color:#1C1C1C}
+  #mapControls button:disabled{color:#B4B4B4;cursor:default;border-color:#ECECEC}
   #legend{position:absolute;top:12px;right:12px;font-size:10px;color:#1C1C1C;
           background:rgba(255,255,255,.88);padding:8px 10px;line-height:1.7}
   #legend .row{display:flex;align-items:center;gap:6px}
   #legend .sw{width:10px;height:10px;flex:0 0 auto;display:inline-block}
   #legend .sw-line{width:16px;height:0;flex:0 0 auto;display:inline-block;
-                   border-top:2px solid #C7C7C7}
+                   border-top:2px solid #A0A0A0}
   #legend .sw-line.blocked{border-top:2.4px dashed #C23B2B}
   #legend .note{margin-top:5px;color:#8C8C8C;font-size:9.5px;max-width:150px}
   #mapEmpty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
@@ -133,9 +140,13 @@
         </svg>
         <div id="mapEmpty" style="display:none"></div>
         <div id="legend"></div>
+        <div id="mapControls">
+          <button type="button" id="fitAllBtn" title="Reset zoom and pan">Fit all</button>
+          <button type="button" id="demoRouteBtn" title="Find a start point whose route is forced to detour around a confirmed danger zone">Find a demo route</button>
+        </div>
         <div id="mapCaption">
           Road network loaded live from /api/roads — the same graph the
-          router uses. Click anywhere to route from that point.
+          router uses. Scroll to zoom, drag to pan, click to route from a point.
         </div>
       </div>
       <div id="routeInfo"><span class="hint">Click anywhere on the map to route from that point to the nearest safe zone with space.</span></div>
@@ -203,24 +214,28 @@ const state = {
   routeErr: null,        // network-level failure fetching the route
   routeLoading: false,
   frame: null,            // current map projection, for click -> lat/lon
-  roads: null,             // {nodes, edges} from /api/roads, null until loaded
+  roads: null,             // {nodes, edges} from /api/roads — static, fetched once
+  roadsBlocked: null,      // {blocked, penalised} from /api/roads/blocked — polled
+  autoFitBBox: null,       // cached "fit all" bbox, set once roads load — see getAutoFitBBox()
+  view: null,              // {minLat,maxLat,minLon,maxLon} of the current zoom/pan; null = auto-fit
+  demoRouteLoading: false,
 };
 
 // ------------------------------------------------------------------ poll
-// /api/roads' nodes/edges are static, but its blocked/penalised lists are
-// recomputed from the current danger map on every request — so roads has
-// to be polled right alongside reports/danger, or the map and the legend
-// end up describing a flood that has since moved on.
+// /api/roads' nodes/edges never change while the server is up (loaded
+// once, below). At OSM scale that's tens of thousands of nodes, so it is
+// NOT part of the 5s poll — only /api/roads/blocked is, which is small and
+// genuinely changes as the danger map does.
 async function poll(){
   try {
-    const [rep, dang, rds] = await Promise.all([
+    const [rep, dang, blk] = await Promise.all([
       fetchJSON("/api/reports"),
       fetchJSON("/api/danger"),
-      fetchJSON("/api/roads"),
+      fetchJSON("/api/roads/blocked"),
     ]);
     state.reports = rep.reports || [];
     state.danger = dang;
-    state.roads = rds;
+    state.roadsBlocked = blk;
     state.apiOk = true;
     state.lastFetch = Date.now();
   } catch (e) {
@@ -229,6 +244,16 @@ async function poll(){
   render();
 }
 
+async function loadRoads(){
+  try {
+    state.roads = await fetchJSON("/api/roads");
+  } catch (e) {
+    state.roads = { nodes: {}, edges: [] };
+  }
+  render();
+}
+
+loadRoads();
 poll();
 setInterval(poll, 5000);
 setInterval(renderTopbar, 1000);   // keep "last updated Ns ago" honest between polls
@@ -250,17 +275,230 @@ async function requestRoute(lat, lon){
   render();
 }
 
+// A district-scale map with a dozen small zones on it is not something an
+// operator can reliably click into — /api/route/demo does the search
+// server-side (it already has the road graph and the danger map; the map
+// should never re-derive that). This just displays what it finds and
+// zooms the view onto it, since the whole point is a detour too small to
+// see at the fit-all scale.
+async function findDemoRoute(){
+  state.clickLatLon = null;
+  state.route = null;
+  state.routeErr = null;
+  state.routeLoading = true;
+  state.demoRouteLoading = true;
+  render();
+  try {
+    const r = await fetchJSON("/api/route/demo");
+    if (r.found) {
+      state.route = r;
+      if (r.demo_start) state.clickLatLon = [r.demo_start.lat, r.demo_start.lon];
+      focusOnRoute(r);
+    } else {
+      state.routeErr = r.reason || "Could not find a demo route right now.";
+    }
+  } catch (e) {
+    state.routeErr = "Could not reach /api/route/demo.";
+  }
+  state.routeLoading = false;
+  state.demoRouteLoading = false;
+  render();
+}
+
+// Zoom/pan the view to fit a route (plus a little context around it) —
+// used only for the demo button, which jumps the operator somewhere they
+// did not pick, unlike an ordinary click where they already chose the view.
+function focusOnRoute(route){
+  if (!route || !route.found || !route.coordinates || !route.coordinates.length) return;
+  const lats = route.coordinates.map(c => c[0]);
+  const lons = route.coordinates.map(c => c[1]);
+  const minLat = Math.min(...lats), maxLat = Math.max(...lats);
+  const minLon = Math.min(...lons), maxLon = Math.max(...lons);
+  const padM = 250;   // room around the route so the zone and nearby roads are visible
+  const midLat = (minLat + maxLat) / 2;
+  const padLat = padM / 111320.0;
+  const padLon = padM / (111320.0 * Math.max(Math.cos(midLat * Math.PI / 180), 1e-6));
+  state.view = clampView({
+    minLat: minLat - padLat, maxLat: maxLat + padLat,
+    minLon: minLon - padLon, maxLon: maxLon + padLon,
+  });
+}
+
+// ------------------------------------------------------ zoom, pan, click
+// Recomputing the projection (not a CSS transform) on every zoom/pan step
+// is what makes a blocked road's dashes actually grow legible as you zoom
+// into a zone, and what keeps a zone's minimum-14px floor (see renderMap)
+// correctly in screen pixels at every zoom level rather than blown up by
+// a transform on top of it. render() rebuilds ~25k road elements, so
+// wheel/drag updates go through one requestAnimationFrame instead of
+// firing on every event — otherwise a fast scroll gesture would queue up
+// far more re-renders than the browser can paint.
+let renderScheduled = false;
+function scheduleRender(){
+  if (renderScheduled) return;
+  renderScheduled = true;
+  requestAnimationFrame(() => { renderScheduled = false; render(); });
+}
+
+// The bbox the map fits to before any zoom/pan — the road network's own
+// extent, not the current reports/zones/route, so it does not shift under
+// an active pan/zoom as data changes on the 5s poll. Cached once roads
+// are loaded, since scanning ~25k nodes on every render would defeat the
+// point of caching anything.
+function computeAutoFitBBox(){
+  const lats = [], lons = [];
+  const roadNodes = (state.roads && state.roads.nodes) || {};
+  Object.values(roadNodes).forEach(([la, lo]) => { lats.push(la); lons.push(lo); });
+
+  if (lats.length === 0) {
+    // Roads have not loaded yet — fall back to whatever is on screen so
+    // the map is not blank while /api/roads is in flight.
+    const zones = (state.danger && state.danger.zones) || [];
+    zones.forEach(z => { lats.push(z.lat); lons.push(z.lon); });
+    state.reports.forEach(r => {
+      if (r.lat !== null && r.lat !== undefined && r.lon !== null && r.lon !== undefined) {
+        lats.push(r.lat); lons.push(r.lon);
+      }
+    });
+  }
+  if (lats.length === 0) { lats.push(-1, 1); lons.push(-1, 1); }
+
+  let minLat = Math.min(...lats), maxLat = Math.max(...lats);
+  let minLon = Math.min(...lons), maxLon = Math.max(...lons);
+  if (minLat === maxLat) { minLat -= 0.01; maxLat += 0.01; }
+  if (minLon === maxLon) { minLon -= 0.01; maxLon += 0.01; }
+  return { minLat, maxLat, minLon, maxLon };
+}
+
+function getAutoFitBBox(){
+  if (state.autoFitBBox) return state.autoFitBBox;
+  const bbox = computeAutoFitBBox();
+  if (state.roads && Object.keys(state.roads.nodes || {}).length > 0) {
+    state.autoFitBBox = bbox;   // the road network is stable — cache for good
+  }
+  return bbox;
+}
+
+// Keeps a zoom/pan bbox from growing past "fit all" (nothing more to see)
+// or shrinking to a degenerate sliver. Returns null (meaning "use auto-fit")
+// when the requested view is at or beyond the fit-all extent.
+const MIN_SPAN_M = 120;   // ~ half a zone's diameter — plenty of room at max zoom
+function clampView(view){
+  const auto = getAutoFitBBox();
+  const lonSpan = view.maxLon - view.minLon;
+  const latSpan = view.maxLat - view.minLat;
+  if (lonSpan >= auto.maxLon - auto.minLon || latSpan >= auto.maxLat - auto.minLat) {
+    return null;
+  }
+  const midLat = (view.minLat + view.maxLat) / 2;
+  const minLatSpan = MIN_SPAN_M / 111320.0;
+  const minLonSpan = MIN_SPAN_M / (111320.0 * Math.max(Math.cos(midLat * Math.PI / 180), 1e-6));
+  if (latSpan < minLatSpan) {
+    const c = midLat;
+    view = { ...view, minLat: c - minLatSpan / 2, maxLat: c + minLatSpan / 2 };
+  }
+  if (lonSpan < minLonSpan) {
+    const c = (view.minLon + view.maxLon) / 2;
+    view = { ...view, minLon: c - minLonSpan / 2, maxLon: c + minLonSpan / 2 };
+  }
+  return view;
+}
+
+function fitAll(){
+  state.view = null;
+  render();
+}
+
 const mapSvg = document.getElementById("mapSvg");
-mapSvg.addEventListener("click", (e) => {
+
+function svgPointFromClient(clientX, clientY){
+  const pt = mapSvg.createSVGPoint();
+  pt.x = clientX; pt.y = clientY;
+  return pt.matrixTransform(mapSvg.getScreenCTM().inverse());
+}
+
+mapSvg.addEventListener("wheel", (e) => {
+  if (!state.frame) return;   // nothing loaded yet
+  e.preventDefault();
+  // A fresh frame, not state.frame (the last PAINTED one) — render() is
+  // throttled to one paint per animation frame, so a fast scroll burst
+  // fires several wheel events before that paint happens. Anchoring each
+  // tick's zoom to a stale bbox from before earlier ticks in the same
+  // burst compounds into real drift; buildFrame() is cheap (no DOM
+  // writes), so computing it fresh per event costs nothing.
+  const f = buildFrame();
+  const p = svgPointFromClient(e.clientX, e.clientY);
+  const bbox = f.bbox;
+  const lon = bbox.minLon + (p.x - f.offX) / f.scale;
+  const lat = bbox.maxLat - (p.y - f.offY) / f.scale;
+
+  // deltaY > 0 (scroll down / pinch out) zooms out, < 0 zooms in. Clamped
+  // per-event so an oversized deltaY from a mouse or a fast trackpad
+  // fling never jumps the zoom level in one step.
+  const factor = Math.min(2, Math.max(0.5, Math.pow(1.0015, e.deltaY)));
+  const fracX = (lon - bbox.minLon) / (bbox.maxLon - bbox.minLon);
+  const fracY = (bbox.maxLat - lat) / (bbox.maxLat - bbox.minLat);
+  const newLonSpan = (bbox.maxLon - bbox.minLon) * factor;
+  const newLatSpan = (bbox.maxLat - bbox.minLat) * factor;
+  const newMinLon = lon - fracX * newLonSpan;
+  const newMaxLat = lat + fracY * newLatSpan;
+
+  state.view = clampView({
+    minLon: newMinLon, maxLon: newMinLon + newLonSpan,
+    maxLat: newMaxLat, minLat: newMaxLat - newLatSpan,
+  });
+  scheduleRender();
+}, { passive: false });
+
+let dragState = null;
+const DRAG_THRESHOLD_PX = 4;   // below this, treat mouseup as a click (route), not a pan
+
+mapSvg.addEventListener("mousedown", (e) => {
+  if (e.button !== 0 || !state.frame) return;
+  dragState = { startX: e.clientX, startY: e.clientY, startFrame: state.frame, moved: false };
+});
+
+window.addEventListener("mousemove", (e) => {
+  if (!dragState) return;
+  const dxPx = e.clientX - dragState.startX;
+  const dyPx = e.clientY - dragState.startY;
+  if (!dragState.moved) {
+    if (Math.hypot(dxPx, dyPx) < DRAG_THRESHOLD_PX) return;
+    dragState.moved = true;
+    mapSvg.classList.add("panning");
+  }
+
+  const f = dragState.startFrame;
+  const ctm = mapSvg.getScreenCTM();
+  const dxSvg = dxPx / ctm.a;
+  const dySvg = dyPx / ctm.d;
+  const dLon = dxSvg / f.scale;
+  const dLat = dySvg / f.scale;
+  const bbox = f.bbox;
+  state.view = clampView({
+    minLon: bbox.minLon - dLon, maxLon: bbox.maxLon - dLon,
+    minLat: bbox.minLat + dLat, maxLat: bbox.maxLat + dLat,
+  });
+  scheduleRender();
+});
+
+window.addEventListener("mouseup", (e) => {
+  if (!dragState) return;
+  const wasDrag = dragState.moved;
+  dragState = null;
+  mapSvg.classList.remove("panning");
+  if (wasDrag) return;
+
   const f = state.frame;
   if (!f) return;
-  const pt = mapSvg.createSVGPoint();
-  pt.x = e.clientX; pt.y = e.clientY;
-  const p = pt.matrixTransform(mapSvg.getScreenCTM().inverse());
+  const p = svgPointFromClient(e.clientX, e.clientY);
   const lon = f.bbox.minLon + (p.x - f.offX) / f.scale;
   const lat = f.bbox.maxLat - (p.y - f.offY) / f.scale;
   requestRoute(lat, lon);
 });
+
+document.getElementById("fitAllBtn").addEventListener("click", fitAll);
+document.getElementById("demoRouteBtn").addEventListener("click", findDemoRoute);
 
 // ------------------------------------------------------------ selection
 async function selectReport(id){
@@ -374,42 +612,17 @@ function renderIncidents(){
 }
 
 // -------------------------------------------------------------- the map
-function bboxOf(){
-  const lats = [], lons = [];
-  const roadNodes = (state.roads && state.roads.nodes) || {};
-  Object.values(roadNodes).forEach(([la, lo]) => { lats.push(la); lons.push(lo); });
-
-  const zones = (state.danger && state.danger.zones) || [];
-  zones.forEach(z => {
-    const dLat = z.radius_m / 111320.0;
-    const dLon = z.radius_m / (111320.0 * Math.cos(z.lat * Math.PI / 180));
-    lats.push(z.lat - dLat, z.lat + dLat);
-    lons.push(z.lon - dLon, z.lon + dLon);
-  });
-
-  state.reports.forEach(r => {
-    if (r.lat !== null && r.lat !== undefined && r.lon !== null && r.lon !== undefined) {
-      lats.push(r.lat); lons.push(r.lon);
-    }
-  });
-
-  if (state.route && state.route.found) {
-    state.route.coordinates.forEach(([la, lo]) => { lats.push(la); lons.push(lo); });
-  }
-  if (state.clickLatLon) { lats.push(state.clickLatLon[0]); lons.push(state.clickLatLon[1]); }
-
-  if (lats.length === 0) { lats.push(-1, 1); lons.push(-1, 1); }   // nothing loaded yet
-
-  let minLat = Math.min(...lats), maxLat = Math.max(...lats);
-  let minLon = Math.min(...lons), maxLon = Math.max(...lons);
-  if (minLat === maxLat) { minLat -= 0.001; maxLat += 0.001; }
-  if (minLon === maxLon) { minLon -= 0.001; maxLon += 0.001; }
-  return { minLat, maxLat, minLon, maxLon };
+// The current view: whatever zoom/pan set (state.view), or the road
+// network's own fit-all extent otherwise. Zones/reports/route/click no
+// longer feed into this — see computeAutoFitBBox's comment, above the
+// zoom/pan handlers, for why that used to make the camera drift.
+function currentBBox(){
+  return state.view || getAutoFitBBox();
 }
 
 function buildFrame(){
   const W = 1000, H = 700, pad = 46;
-  const bbox = bboxOf();
+  const bbox = currentBBox();
   const scaleX = (W - 2 * pad) / (bbox.maxLon - bbox.minLon);
   const scaleY = (H - 2 * pad) / (bbox.maxLat - bbox.minLat);
   const scale = Math.min(scaleX, scaleY);
@@ -433,10 +646,10 @@ function renderMap(){
   const roadNodes = (state.roads && state.roads.nodes) || {};
   const roadEdges = (state.roads && state.roads.edges) || [];
   const zones = (state.danger && state.danger.zones) || [];
-  // blocked/penalised come straight from /api/roads, which computed them by
+  // blocked/penalised come from /api/roads/blocked, which computed them by
   // calling routing.py's apply_zones() — the same function the router
   // itself uses. The map never re-derives this geometry client-side.
-  const blockedEdges = new Set((state.roads && state.roads.blocked || []).map(([a, b]) => a + "|" + b));
+  const blockedEdges = new Set((state.roadsBlocked && state.roadsBlocked.blocked || []).map(([a, b]) => a + "|" + b));
 
   // ---- danger zones, drawn first so roads and markers sit on top of them.
   // Fill is kept nearly transparent — the point of this map is that roads
@@ -445,7 +658,13 @@ function renderMap(){
   // reads from solid vs dashed outline, same as before.
   const zonesHtml = zones.map(z => {
     const [cx, cy] = project(f, z.lat, z.lon);
-    const rr = Math.max(6, (z.radius_m / 111320.0) * f.scale);
+    // A ~225m zone on a ~20km district map is under a pixel at fit-all
+    // scale — invisible, along with the blocked roads inside it, which
+    // are the entire point. f.scale reflects the CURRENT zoom (this is a
+    // real reprojection, not a transform on top of one), so once zoomed
+    // in far enough that the true radius exceeds 14px, true scaling wins
+    // over the floor on its own — no separate zoom-level check needed.
+    const rr = Math.max(14, (z.radius_m / 111320.0) * f.scale);
     const color = DANGER_COLOR[z.danger] || "#8C8C8C";
     const confirmed = z.routing === "block";
     const fillOp = 0.15 + Math.max(0, Math.min(1, z.confidence)) * 0.10; // 0.15 - 0.25
@@ -475,15 +694,26 @@ function renderMap(){
   // ---- roads, drawn on top of zone fills but below markers/route, so a
   // blocked road reads as visibly inside a coloured zone rather than hidden
   // under it. Blocked segments (confirmed flooding, removed from routing)
-  // get a distinct red/dashed/faded style instead of the normal grey.
+  // are noticeably thicker as well as red/dashed, so they stand out even
+  // zoomed all the way out; open roads are a darker grey than before —
+  // #C7C7C7 all but disappeared against #fff at OSM density.
+  const VIEW_MARGIN = 60;   // px of slack so a segment clipping the edge isn't dropped
   const roadsHtml = roadEdges.map(([a, b]) => {
     const na = roadNodes[a], nb = roadNodes[b];
     if (!na || !nb) return "";
     const [x1, y1] = project(f, na[0], na[1]), [x2, y2] = project(f, nb[0], nb[1]);
+    // Cheap cull: skip segments that are clearly off the same side of the
+    // current view. Real savings once zoomed into a small area — most of
+    // the district's ~25k segments are off-screen, and this reprojects
+    // (rebuilds every line) on each zoom/pan step.
+    if ((x1 < -VIEW_MARGIN && x2 < -VIEW_MARGIN) || (x1 > f.W + VIEW_MARGIN && x2 > f.W + VIEW_MARGIN) ||
+        (y1 < -VIEW_MARGIN && y2 < -VIEW_MARGIN) || (y1 > f.H + VIEW_MARGIN && y2 > f.H + VIEW_MARGIN)) {
+      return "";
+    }
     const blocked = blockedEdges.has(a + "|" + b);
     const style = blocked
-      ? 'stroke="#C23B2B" stroke-width="2.4" stroke-dasharray="5 4" stroke-opacity="0.85"'
-      : 'stroke="#C7C7C7" stroke-width="1"';
+      ? 'stroke="#C23B2B" stroke-width="3.2" stroke-dasharray="5 4" stroke-opacity="0.95"'
+      : 'stroke="#A0A0A0" stroke-width="1.1"';
     const title = blocked ? "<title>Blocked by confirmed flooding</title>" : "";
     return `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" ${style}>${title}</line>`;
   }).join("");
@@ -525,8 +755,8 @@ function renderMap(){
 
   // ---- legend
   // Recomputed on every renderMap() call, which runs after every poll() —
-  // state.roads.blocked is never more than one poll cycle old, so this
-  // always matches what /api/roads just returned, not some earlier seed.
+  // state.roadsBlocked is never more than one poll cycle old, so this
+  // always matches what /api/roads/blocked just returned, not some earlier seed.
   const roadsRemovedCount = blockedEdges.size;
   document.getElementById("legend").innerHTML = `
     ${[1,2,3,4].map(d => `<div class="row"><span class="sw" style="background:${DANGER_COLOR[d]}"></span>${DANGER_LABEL[d]}</div>`).join("")}
@@ -547,6 +777,13 @@ function renderMap(){
       `roads-removed mismatch: legend says ${roadsRemovedCount}, route panel says ${state.route.roads_removed}`
     );
   }
+
+  // ---- map controls
+  const fitAllBtn = document.getElementById("fitAllBtn");
+  fitAllBtn.disabled = state.view === null;
+  const demoBtn = document.getElementById("demoRouteBtn");
+  demoBtn.disabled = state.demoRouteLoading;
+  demoBtn.textContent = state.demoRouteLoading ? "Finding a demo route…" : "Find a demo route";
 
   // ---- empty overlay
   const emptyEl = document.getElementById("mapEmpty");
@@ -633,11 +870,11 @@ function renderReview(){
     return;
   }
   // "Zones blocking roads" (stats.blocked, a zone count from /api/danger)
-  // and "Roads removed" (a road-segment count from /api/roads.blocked) are
+  // and "Roads removed" (a road-segment count from /api/roads/blocked) are
   // different units. Naming them separately keeps them from reading as the
   // same number disagreeing, which is what "Blocked" next to the roads
   // legend used to look like.
-  const roadsRemoved = (state.roads && state.roads.blocked && state.roads.blocked.length) || 0;
+  const roadsRemoved = (state.roadsBlocked && state.roadsBlocked.blocked && state.roadsBlocked.blocked.length) || 0;
   const rows = [
     ["Reports", stats.reports],
     ["Clusters", stats.clusters],

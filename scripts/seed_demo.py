@@ -29,6 +29,7 @@ import httpx
 
 from backend import db, fakedata
 from backend.danger import CLUSTER_RADIUS_M, haversine_m
+from backend.roadloader import DEFAULT_PATH as ROADS_PATH, load_osm
 from backend.routing import apply_zones, zones_touching_roads
 
 # id, name, north_m/east_m offset from BASE_LAT/BASE_LON, capacity, occupied
@@ -40,32 +41,35 @@ SAFE_ZONES = [
 
 
 def road_graph():
-    """The same synthetic grid backend.main._road_graph() builds for /api/route.
+    """The same real Morigaon road network backend.main._road_graph() builds
+    for /api/route.
 
-    There is no endpoint to fetch the live graph, so this must be called the
-    same way, with the same defaults, or the demo's zones and the router's
+    There is no endpoint to fetch the live graph, so this must be loaded the
+    same way, from the same file, or the demo's zones and the router's
     roads drift into different places again.
     """
-    return fakedata.grid_town()
+    return load_osm(ROADS_PATH)
 
 
 def pick_incident_centres(graph, count, seed):
     """Incident centres that sit ON the road network, not scattered near it.
 
-    grid_town() covers a small, fixed area (about 1.6 km square by
-    default). scene_realistic()'s own centre-picker scatters incidents over
-    roughly +/-6 km around the same base point regardless of what road
-    network is in play, so the two barely ever overlap — no danger zone
-    intersects any road, and the routing demo has nothing to route around.
+    scene_realistic()'s own centre-picker scatters incidents over roughly
+    +/-6 km around BASE_LAT/BASE_LON regardless of what road network is in
+    play. That was a problem on grid_town()'s ~1.6 km synthetic grid — the
+    two barely ever overlapped, so no danger zone intersected any road and
+    the routing demo had nothing to route around. The real Morigaon extract
+    (~20 km across, see scripts/fetch_roads.py) covers that scatter
+    radius fine, but picking real graph nodes and jittering by a few metres
+    is still what guarantees overlap, rather than hoping for it.
 
-    Picking real graph nodes and jittering by a few metres keeps each
-    incident's cluster (spread up to ~75 m, see scene_realistic) centred
-    close enough to the node that its drawn zone (spread + CLUSTER_RADIUS_M,
-    at least 150 m) reliably reaches every road edge meeting there.
+    Jittering keeps each incident's cluster (spread up to ~75 m, see
+    scene_realistic) centred close enough to the node that its drawn zone
+    (spread + CLUSTER_RADIUS_M, at least 150 m) reliably reaches every road
+    edge meeting there.
 
     Centres are kept at least MIN_SEPARATION_M apart so incidents stay
-    distinct zones instead of single-link-chaining into one giant cluster
-    that swallows most of the small grid's roads.
+    distinct zones instead of single-link-chaining into one giant cluster.
     """
     MIN_SEPARATION_M = 2.0 * CLUSTER_RADIUS_M + 150.0   # clear of chaining, with margin
     node_ids = list(graph.nodes.keys())
@@ -93,7 +97,7 @@ def pick_incident_centres(graph, count, seed):
     if chosen is None:
         raise ValueError(
             f"could not find {count} road nodes at least {MIN_SEPARATION_M:.0f} m "
-            f"apart on this grid — ask for fewer incidents or a bigger grid")
+            f"apart on this road network — ask for fewer incidents")
 
     return [fakedata.offset(*graph.nodes[nid], rng.uniform(-30, 30), rng.uniform(-30, 30))
             for nid in chosen]
@@ -163,11 +167,11 @@ def main():
     ap.add_argument("--n", type=int, default=240, help="number of reports")
     ap.add_argument("--incidents", type=int, default=12,
                      help="hidden true incidents (scene_realistic()'s own default). "
-                          "On grid_town's ~1.6 km square demo grid this floods "
-                          "most of the network — expect danger-aware routing to "
-                          "find a path from only a minority of start points. Pass "
-                          "a lower --incidents for a demo where routing succeeds "
-                          "more often")
+                          "12 was previously a workaround — on grid_town's ~1.6 km "
+                          "synthetic grid it flooded most of the network. The real "
+                          "~20 km Morigaon extract (data/morigaon_roads.json) has "
+                          "room for this many without that problem, so this is now "
+                          "just a normal, realistic incident count")
     ap.add_argument("--seed", type=int, default=2026)
     ap.add_argument("--accuracy", type=float, default=0.82,
                      help="probability an observation matches the hidden truth")

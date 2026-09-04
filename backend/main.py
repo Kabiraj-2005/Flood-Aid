@@ -10,6 +10,7 @@ Run:  uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
 """
 
 import json
+import random
 from typing import Optional, List
 
 from fastapi import FastAPI
@@ -272,44 +273,157 @@ def route(lat: float, lon: float, mode: str = "drive"):
     return result
 
 
+@app.get("/api/route/demo")
+def demo_route(mode: str = "drive"):
+    """
+    Pick a start point whose route to the nearest safe zone with space is
+    forced to detour around a confirmed danger zone, then route from there.
+
+    Exists for the control room's "find a demo route" button. At district
+    scale, clicking around a 20 km map hoping to land somewhere a dozen
+    small zones actually affect is not a demo, it's luck — and the whole
+    point of this screen is showing the detour, reliably.
+
+    Candidates are one endpoint of every currently-blocked road edge: each
+    is, by construction, immediately next to flooding the router has to
+    route around. For each, check whether the ROUTE THAT IGNORES DANGER
+    (zones=[]) would actually cross a blocked edge on its way to the
+    nearest safe zone — if it does, the danger-aware route from that same
+    point is guaranteed to differ, no need to compute it just to check.
+
+    That guarantee matters for latency, not just for tidiness:
+    apply_zones() over the full danger map costs ~225ms on this graph (12
+    zones x 25k edges), so route_to_safety(..., zones=danger, ...) pays
+    that on every call. Calling it once per candidate — the first version
+    of this endpoint did — meant up to 60 candidates x that cost, and a
+    button click that could take north of ten seconds. blocked (below) is
+    computed exactly once; membership-testing a candidate's naive path
+    against that set is nearly free, and the real (danger-aware) route is
+    computed only once, for the candidate that already proved it needs it.
+    """
+    conn = db.connect()
+    reports = [db.row_to_dict(r) for r in
+               conn.execute("SELECT * FROM reports").fetchall()]
+    zones_rows = conn.execute("SELECT * FROM safe_zones").fetchall()
+    conn.close()
+
+    graph = _road_graph()
+    if graph is None:
+        return {"found": False, "reason": "no road network loaded"}
+
+    danger = build_danger_map(reports)["zones"]
+    safe = [dict(z) for z in zones_rows]
+
+    zone_effects = apply_zones(graph, danger)
+    blocked, _penalties, _why = zone_effects
+    if not blocked:
+        return {"found": False,
+                "reason": "no roads are currently blocked — nothing to detour around"}
+
+    candidates = [nid for pair in blocked for nid in pair]
+    random.shuffle(candidates)
+
+    tried = set()
+    for node_id in candidates:
+        if node_id in tried:
+            continue
+        tried.add(node_id)
+        if len(tried) > 60:      # bound worst-case latency for an interactive button
+            break
+
+        lat, lon = graph.nodes[node_id]
+        naive = route_to_safety(graph, lat, lon, safe, zones=[], mode=mode)
+        if not naive.get("found"):
+            continue
+
+        path_edges = {tuple(sorted((a, b)))
+                      for a, b in zip(naive["path"], naive["path"][1:])}
+        if not (path_edges & blocked):
+            continue     # this start's shortest route never needed a blocked road anyway
+
+        # zone_effects reused here (and would be for every other candidate
+        # that reaches this point) instead of recomputed — see find_route's
+        # _zone_effects docstring for why that recomputation was the whole
+        # latency problem.
+        aware = route_to_safety(graph, lat, lon, safe, zones=danger, mode=mode,
+                                _zone_effects=zone_effects)
+        if aware.get("found"):
+            aware["danger_zones_considered"] = len(danger)
+            aware["demo_start"] = {"lat": lat, "lon": lon}
+            aware["naive_distance_m"] = naive["distance_m"]
+            return aware
+
+    return {
+        "found": False,
+        "reason": f"checked {len(tried)} blocked-road neighbourhood(s) but none forced "
+                  f"a detour to the nearest safe zone with space — try again, or after "
+                  f"the danger map next changes",
+    }
+
+
 _GRAPH = None
 
 
 def _road_graph():
     """
-    The road network.
+    The road network the app actually routes on.
 
-    Synthetic for now so the routing logic can be tested against known
-    answers. Swap this one function for an OpenStreetMap loader and
-    nothing else changes.
+    test_routing.py keeps testing against the synthetic grid_town() graph
+    directly — those scenes have known answers, and that stays the
+    correctness fixture. This is the demo network: real Morigaon roads
+    (OpenStreetMap, fetched offline by scripts/fetch_roads.py — see that
+    script's docstring for why this is never fetched at runtime), loaded
+    once and cached for the life of the process.
     """
     global _GRAPH
     if _GRAPH is None:
-        from .fakedata import grid_town
-        _GRAPH = grid_town()
+        from .roadloader import load_osm, DEFAULT_PATH
+        _GRAPH = load_osm(DEFAULT_PATH)
     return _GRAPH
 
 
 @app.get("/api/roads")
 def roads():
     """
-    The road network the router actually runs on, plus which edges the
-    current danger map removes or penalises.
+    The road network the router actually runs on: nodes and edges only.
 
     control.html used to keep its own hardcoded copy of grid_town() to draw
     the map. That drifts the moment either copy changes, and shows routes
     that appear to leave the road network. This is the same graph
     _road_graph() builds, so the map always matches what /api/route uses.
 
-    blocked/penalised come from apply_zones() — the same function
-    find_route() calls — instead of the map re-deriving them client-side.
-    A second, JS copy of the zone-vs-edge geometry would drift from
-    routing.py the moment either one changed, and the map would show a road
-    as open that the router has already removed.
+    Split from /api/roads/blocked (see below) because at OSM scale this
+    payload is tens of thousands of nodes — the control room fetches this
+    once on load, not on every 5s poll, since the graph itself never
+    changes while the server is up.
     """
     graph = _road_graph()
     if graph is None:
-        return {"nodes": {}, "edges": [], "blocked": [], "penalised": []}
+        return {"nodes": {}, "edges": []}
+    return {
+        "nodes": {nid: [lat, lon] for nid, (lat, lon) in graph.nodes.items()},
+        "edges": [[a, b] for (a, b) in graph.edge_meta.keys()],
+    }
+
+
+@app.get("/api/roads/blocked")
+def roads_blocked():
+    """
+    Which road edges the CURRENT danger map removes or penalises.
+
+    Split out from /api/roads so the control room can poll just this —
+    small, and genuinely changes every few seconds — without re-sending the
+    whole (potentially tens-of-thousands-of-nodes) graph on every cycle.
+
+    Comes from apply_zones() — the same function find_route() calls —
+    instead of the map re-deriving it client-side. A second, JS copy of the
+    zone-vs-edge geometry would drift from routing.py the moment either one
+    changed, and the map would show a road as open that the router has
+    already removed.
+    """
+    graph = _road_graph()
+    if graph is None:
+        return {"blocked": [], "penalised": []}
 
     conn = db.connect()
     reports = [db.row_to_dict(r) for r in
@@ -319,8 +433,6 @@ def roads():
     blocked, penalties, _why = apply_zones(graph, danger)
 
     return {
-        "nodes": {nid: [lat, lon] for nid, (lat, lon) in graph.nodes.items()},
-        "edges": [[a, b] for (a, b) in graph.edge_meta.keys()],
         "blocked": [[a, b] for (a, b) in blocked],
         "penalised": [[a, b] for (a, b) in penalties.keys()],
     }

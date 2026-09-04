@@ -49,10 +49,12 @@ class RoadGraph:
         self.nodes = {}                  # id -> (lat, lon)
         self.edges = {}                  # id -> [(neighbour_id, edge_key)]
         self.edge_meta = {}              # edge_key -> {length_m, road_type}
+        self._buckets = None              # built lazily, invalidated on add_node
 
     def add_node(self, node_id, lat, lon):
         self.nodes[node_id] = (lat, lon)
         self.edges.setdefault(node_id, [])
+        self._buckets = None
 
     def add_edge(self, a, b, road_type="residential", two_way=True):
         la, lo_a = self.nodes[a]
@@ -72,13 +74,97 @@ class RoadGraph:
             kmh = DEFAULT_SPEED_KMH.get(meta["road_type"], 25.0)
         return meta["length_m"] / (kmh * 1000 / 3600)
 
+    # A ~500 m grid cell. Only used to bucket nodes for nearest_node — not
+    # exact, doesn't need to be; it just has to keep each bucket small.
+    _BUCKET_M = 500.0
+
+    def _bucket_steps(self):
+        """Degrees-per-bucket for lat and lon, sized to _BUCKET_M.
+
+        Longitude degrees shrink towards the poles, but the network here
+        spans a single district — one reference latitude (the mean) is
+        close enough for every node in it.
+        """
+        lats = [lat for lat, _ in self.nodes.values()]
+        mean_lat = sum(lats) / len(lats)
+        lat_step = self._BUCKET_M / 111_320.0
+        lon_step = self._BUCKET_M / (111_320.0 * max(math.cos(math.radians(mean_lat)), 1e-6))
+        return lat_step, lon_step
+
+    def _bucket_key(self, lat, lon, lat_step, lon_step):
+        return (int(lat // lat_step), int(lon // lon_step))
+
+    def _ensure_buckets(self):
+        if self._buckets is not None:
+            return
+        if not self.nodes:
+            self._buckets = ({}, 1.0, 1.0)
+            return
+        lat_step, lon_step = self._bucket_steps()
+        buckets = {}
+        for nid, (lat, lon) in self.nodes.items():
+            key = self._bucket_key(lat, lon, lat_step, lon_step)
+            buckets.setdefault(key, []).append(nid)
+        self._buckets = (buckets, lat_step, lon_step)
+
     def nearest_node(self, lat, lon):
-        """Snap a position to the closest node on the network."""
+        """
+        Snap a position to the closest node on the network.
+
+        A linear scan is fine at grid_town's 81 nodes and far too slow at
+        OSM scale — this runs once per safe zone on every /api/route call.
+        Nodes are bucketed on a ~500 m grid; we start from the target
+        bucket and its eight neighbours and widen outward one ring at a
+        time.
+
+        Real OSM data is not evenly spaced like the synthetic grid, so
+        "widen only if the 3x3 block is empty" is not enough: a block can
+        have one candidate node in a corner while a genuinely closer node
+        sits just outside it, in the next ring out. So instead we keep
+        expanding until the closest candidate found so far is provably
+        nearer than anything an unsearched ring could contain — after
+        fully searching out to ring R, any unsearched bucket is at least
+        R * _BUCKET_M away, so once best_d <= R * _BUCKET_M no wider ring
+        can beat it.
+        """
+        self._ensure_buckets()
+        buckets, lat_step, lon_step = self._buckets
+        if not self.nodes:
+            return None, float("inf")
+
+        bi, bj = self._bucket_key(lat, lon, lat_step, lon_step)
         best, best_d = None, float("inf")
-        for nid, (nlat, nlon) in self.nodes.items():
-            d = haversine_m(lat, lon, nlat, nlon)
-            if d < best_d:
-                best, best_d = nid, d
+        searched = set()
+        ring = 1
+        max_ring = 40   # ~20 km out; beyond this a full scan is cheaper than widening further
+
+        while ring <= max_ring:
+            cells = [(bi + di, bj + dj)
+                     for di in range(-ring, ring + 1)
+                     for dj in range(-ring, ring + 1)]
+            for cell in cells:
+                if cell in searched:
+                    continue
+                searched.add(cell)
+                for nid in buckets.get(cell, []):
+                    nlat, nlon = self.nodes[nid]
+                    d = haversine_m(lat, lon, nlat, nlon)
+                    if d < best_d:
+                        best, best_d = nid, d
+
+            if best is not None and best_d <= ring * self._BUCKET_M:
+                break
+            ring += 1
+
+        if best is None:
+            # Nothing within max_ring at all — a point far outside the
+            # network's extent. Fall back to a full scan rather than
+            # returning nothing.
+            for nid, (nlat, nlon) in self.nodes.items():
+                d = haversine_m(lat, lon, nlat, nlon)
+                if d < best_d:
+                    best, best_d = nid, d
+
         return best, best_d
 
 
@@ -171,7 +257,7 @@ def apply_zones(graph, zones):
 # ------------------------------------------------------------------ A*
 
 def find_route(graph, start_id, goal_ids, zones=(), mode="drive",
-               allow_uncertain=True):
+               allow_uncertain=True, _zone_effects=None):
     """
     Cheapest path from start to the NEAREST of several goals.
 
@@ -183,6 +269,14 @@ def find_route(graph, start_id, goal_ids, zones=(), mode="drive",
     Returns a dict with the path and, importantly, WHY — which zones were
     avoided, and whether the route crosses anything uncertain. A route
     without its evidence is not something a dispatcher should act on.
+
+    _zone_effects is an internal escape hatch: pass apply_zones(graph,
+    zones)'s own return value when a caller already has it and is about to
+    call this in a loop with the SAME zones every time (the control room's
+    "find a demo route" does — see /api/route/demo). apply_zones is
+    O(edges x zones); at district scale that's real cost (~225ms for 12
+    zones over 25k edges) not worth paying per candidate. Every normal
+    caller leaves this None and gets exactly the old behaviour.
     """
     goal_ids = set(goal_ids)
     if start_id not in graph.nodes:
@@ -190,7 +284,7 @@ def find_route(graph, start_id, goal_ids, zones=(), mode="drive",
     if not goal_ids:
         return {"found": False, "reason": "no destination given"}
 
-    blocked, penalties, why = apply_zones(graph, zones)
+    blocked, penalties, why = _zone_effects if _zone_effects is not None else apply_zones(graph, zones)
 
     # A* needs an optimistic guess of the remaining cost. Straight-line
     # distance at the fastest speed can never overestimate, which is what
@@ -286,7 +380,8 @@ def _describe(graph, path, cost_s, uncertain_zones, why, blocked, mode):
     }
 
 
-def route_to_safety(graph, lat, lon, safe_zones, zones=(), mode="drive"):
+def route_to_safety(graph, lat, lon, safe_zones, zones=(), mode="drive",
+                    _zone_effects=None):
     """
     The call the app actually makes: from a position to the nearest safe
     zone that still has space.
@@ -294,6 +389,10 @@ def route_to_safety(graph, lat, lon, safe_zones, zones=(), mode="drive"):
     A safe zone that is full is not a destination. Sending someone to a
     shelter with no room means a second displacement, and that is a real
     failure people have experienced.
+
+    _zone_effects: see find_route — passed straight through for a caller
+    that already has apply_zones(graph, zones)'s result and is calling this
+    repeatedly with the same zones.
     """
     start, snap_m = graph.nearest_node(lat, lon)
     if start is None:
@@ -311,7 +410,8 @@ def route_to_safety(graph, lat, lon, safe_zones, zones=(), mode="drive"):
         nid, _ = graph.nearest_node(z["lat"], z["lon"])
         goal_map.setdefault(nid, z)
 
-    result = find_route(graph, start, set(goal_map), zones, mode)
+    result = find_route(graph, start, set(goal_map), zones, mode,
+                        _zone_effects=_zone_effects)
     if result["found"]:
         result["snapped_m"] = round(snap_m, 1)
         result["destination"] = goal_map[result["path"][-1]]
