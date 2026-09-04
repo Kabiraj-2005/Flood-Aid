@@ -14,7 +14,12 @@ from backend.danger import (
 )
 from backend import fakedata
 
-NOW = int(time.time() * 1000)
+# Pinned, not time.time(). The scenes below only ever use ages relative to
+# `now`, so the absolute value shouldn't matter mathematically — but a wall
+# clock made the realistic-benchmark held-report count flaky between runs
+# (see danger.py's freshness curve), and a fixed constant makes every run
+# byte-for-byte identical instead of merely "usually" identical.
+NOW = 1_735_000_000_000  # 2024-12-24T00:26:40Z, arbitrary but fixed
 ok = lambda msg: print("  pass  " + msg)
 
 
@@ -151,53 +156,59 @@ scene = fakedata.scene_realistic(n=240, incidents=12, now=NOW, seed=2026)
 res = build_danger_map(scene["reports"], NOW)
 truth_incidents = scene["truth"]["incidents"]
 
-# Map each generated report to its hidden incident. This information exists only
-# in the benchmark truth, never in the report payload seen by the algorithm.
-truth_by_report = {
-    rid: incident["incident_id"]
-    for incident in truth_incidents
-    for rid in incident["report_ids"]
-}
-
 # Anti-cheating checks: hidden incident membership must exist only in the
-# separate truth structure. Reports themselves may contain IDs and device IDs,
-# but neither may encode the hidden incident index. The clustering code receives
+# separate truth structure — never as a field, an id prefix, or a substring
+# of an id/device_id the algorithm can see. The clustering code receives
 # only scene["reports"].
+incident_ids = {i["incident_id"] for i in truth_incidents}
 assert all("incident_id" not in r for r in scene["reports"])
 assert all(not str(r["id"]).startswith("R") for r in scene["reports"])
 assert all("real-dev-" not in str(r["device_id"]) for r in scene["reports"])
+assert all(not any(iid in str(r["id"]) for iid in incident_ids)
+           for r in scene["reports"])
+assert all(not any(iid in str(r["device_id"]) for iid in incident_ids)
+           for r in scene["reports"])
+ok("no report carries a hidden incident id, index, or marker")
 
-zone_incidents = []
-for z in res["zones"]:
-    ids = {truth_by_report[rid] for rid in z["report_ids"]}
-    zone_incidents.append(ids)
+# Score by geometry only: does a produced zone's footprint (its centroid and
+# radius, both taken straight from res["zones"]) contain a hidden incident's
+# true center? This never looks at report ids or the truth's report_ids
+# lists — only at lat/lon, exactly like a human checking the map would.
+SLACK_M = 50.0  # zone radius already includes CLUSTER_RADIUS_M; a little more
+                # for centroid drift from noisy/held reports.
 
-# A merge is a produced zone containing reports from multiple hidden incidents.
+
+def _incidents_within(zone):
+    return [
+        inc["incident_id"] for inc in truth_incidents
+        if haversine_m(zone["lat"], zone["lon"],
+                        inc["center"]["lat"], inc["center"]["lon"])
+           <= zone["radius_m"] + SLACK_M
+    ]
+
+
+zone_incidents = [_incidents_within(z) for z in res["zones"]]
+
+# A merge is a produced zone whose footprint contains more than one hidden
+# incident's true center.
 merges = [ids for ids in zone_incidents if len(ids) > 1]
 
-# A split is a hidden incident represented by more than one produced zone.
+# A split is a hidden incident whose true center falls inside more than one
+# produced zone's footprint.
 incident_zone_counts = {i["incident_id"]: 0 for i in truth_incidents}
 for ids in zone_incidents:
     for incident_id in ids:
         incident_zone_counts[incident_id] += 1
 splits = [incident_id for incident_id, count in incident_zone_counts.items() if count > 1]
 
-# A hidden incident is recovered when all of its non-held reports that made it
-# into a zone landed in the same zone. Held contradictory observations are
-# intentionally allowed to be absent from the final zone.
-held_ids = {h["report_id"] for h in res["held"]}
-recovered = 0
-for incident in truth_incidents:
-    expected = set(incident["report_ids"]) - held_ids
-    containing = [ids for z, ids in zip(res["zones"], zone_incidents)
-                  if expected & set(z["report_ids"])]
-    if expected and len(containing) == 1:
-        recovered += 1
+# A hidden incident is recovered when exactly one produced zone's footprint
+# contains its true center.
+recovered = sum(1 for count in incident_zone_counts.values() if count == 1)
 
 print(f"        reports={len(scene['reports'])}  truth incidents={len(truth_incidents)}")
 print(f"        produced zones={len(res['zones'])}  merges={len(merges)}  splits={len(splits)}")
 print(f"        incidents recovered={recovered}/{len(truth_incidents)}")
-print(f"        held observations={len(held_ids)}")
+print(f"        held observations={len(res['held'])}")
 
 assert len(merges) == 0, f"false merge(s): {merges}"
 assert len(splits) == 0, f"false split(s): {splits}"

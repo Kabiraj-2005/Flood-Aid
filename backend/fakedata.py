@@ -45,7 +45,13 @@ def offset(lat, lon, north_m, east_m):
 
 def make_report(rid, lat, lon, *, device, water, minutes_ago,
                 source="volunteer", people=None, injured=0, rising=0,
-                road="unknown", loc_conf=1.0, now=None):
+                road="unknown", loc_conf=1.0, now=None, rng=None):
+    """``rng`` must be an explicitly seeded random.Random. Falling back to
+    the bare `random` module means "whatever state the global RNG happens
+    to be in" — not reproducible from a seed. Every caller in this file
+    passes its own seeded instance; do not add a call site that doesn't.
+    """
+    rng = rng or random
     now = now or int(time.time() * 1000)
     t = now - minutes_ago * 60_000
     return {
@@ -54,13 +60,13 @@ def make_report(rid, lat, lon, *, device, water, minutes_ago,
         "counter": 1,
         "phone_time": t,
         "source": source,
-        "text": random.choice(ASSAMESE_SNIPPETS + MIXED_SNIPPETS),
+        "text": rng.choice(ASSAMESE_SNIPPETS + MIXED_SNIPPETS),
         "photo_ids": [],
         "lat": lat, "lon": lon, "polygon": None,
         "location_confidence": loc_conf,
-        "people_count": people if people is not None else random.randint(2, 20),
+        "people_count": people if people is not None else rng.randint(2, 20),
         "injured": injured,
-        "children_elderly": random.choice([0, 0, 1]),
+        "children_elderly": rng.choice([0, 0, 1]),
         "water_level": water,
         "rising": rising,
         "road_passable": road,
@@ -73,7 +79,7 @@ def make_report(rid, lat, lon, *, device, water, minutes_ago,
     }
 
 
-def scene_basic(now=None):
+def scene_basic(now=None, seed=1001):
     """
     Four separate places, known in advance.
 
@@ -82,6 +88,7 @@ def scene_basic(now=None):
       C: 3 reports, one of them 8 hours old        -> confidence dragged down
       D: 5 reports from ONE device, waist deep     -> still ONE voice
     """
+    rng = random.Random(seed)
     now = now or int(time.time() * 1000)
     reports = []
 
@@ -91,26 +98,26 @@ def scene_basic(now=None):
         lat, lon = offset(BASE_LAT, BASE_LON, i * 40, 0)
         reports.append(make_report(
             f"A{i}", lat, lon, device=f"dev-a{i}", water="waist",
-            minutes_ago=10 + i * 5, rising=1, road="no", now=now))
+            minutes_ago=10 + i * 5, rising=1, road="no", now=now, rng=rng))
 
     # B — one lonely report, 2 km east
     lat, lon = offset(BASE_LAT, BASE_LON, 0, 2000)
     reports.append(make_report("B0", lat, lon, device="dev-b",
-                               water="knee", minutes_ago=20, now=now))
+                               water="knee", minutes_ago=20, now=now, rng=rng))
 
     # C — three reports 2 km north, but the newest is 4 hours old
     for i in range(3):
         lat, lon = offset(BASE_LAT, BASE_LON, 2000 + i * 50, 0)
         reports.append(make_report(
             f"C{i}", lat, lon, device=f"dev-c{i}", water="knee",
-            minutes_ago=240 + i * 60, now=now))
+            minutes_ago=240 + i * 60, now=now, rng=rng))
 
     # D — one person filing five times from the same phone
     for i in range(5):
         lat, lon = offset(BASE_LAT, BASE_LON, 0, -2000 - i * 20)
         reports.append(make_report(
             f"D{i}", lat, lon, device="dev-d-single", water="waist",
-            minutes_ago=15 + i, now=now))
+            minutes_ago=15 + i, now=now, rng=rng))
 
     return {
         "reports": reports,
@@ -128,25 +135,26 @@ def scene_basic(now=None):
     }
 
 
-def scene_contradiction(now=None):
+def scene_contradiction(now=None, seed=1002):
     """
     Four people say a road is under water. A fifth says it is clear.
 
     The fifth must NOT erase the zone. It must be held for a human.
     This is the demo moment — get it right.
     """
+    rng = random.Random(seed)
     now = now or int(time.time() * 1000)
     reports = []
     for i in range(4):
         lat, lon = offset(BASE_LAT, BASE_LON, i * 30, 0)
         reports.append(make_report(
             f"X{i}", lat, lon, device=f"dev-x{i}", water="waist",
-            minutes_ago=30 + i * 10, road="no", now=now))
+            minutes_ago=30 + i * 10, road="no", now=now, rng=rng))
 
     lat, lon = offset(BASE_LAT, BASE_LON, 60, 20)
     reports.append(make_report(
         "LIAR", lat, lon, device="dev-liar", water=None,
-        minutes_ago=5, road="yes", now=now))
+        minutes_ago=5, road="yes", now=now, rng=rng))
 
     return {
         "reports": reports,
@@ -160,24 +168,25 @@ def scene_contradiction(now=None):
     }
 
 
-def scene_aerial(now=None):
+def scene_aerial(now=None, seed=1003):
     """
     Ground reports say knee deep. A fresh drone survey says waist.
 
     Direct observation should carry more weight than description.
     """
+    rng = random.Random(seed)
     now = now or int(time.time() * 1000)
     reports = []
     for i in range(2):
         lat, lon = offset(BASE_LAT, BASE_LON, i * 50, 0)
         reports.append(make_report(
             f"G{i}", lat, lon, device=f"dev-g{i}", water="knee",
-            minutes_ago=90 + i * 20, now=now))
+            minutes_ago=90 + i * 20, now=now, rng=rng))
 
     lat, lon = offset(BASE_LAT, BASE_LON, 25, 10)
     reports.append(make_report(
         "AER", lat, lon, device="drone-1", water="waist",
-        minutes_ago=5, source="aerial", loc_conf=1.0, now=now))
+        minutes_ago=5, source="aerial", loc_conf=1.0, now=now, rng=rng))
 
     return {
         "reports": reports,
@@ -319,6 +328,7 @@ def scene_realistic(n=240, incidents=12, now=None, seed=2026):
                 road=road,
                 loc_conf=loc_conf,
                 now=now,
+                rng=rng,
             ))
 
         truth_incidents.append({
@@ -353,24 +363,24 @@ def scene_realistic(n=240, incidents=12, now=None, seed=2026):
 
 def scene_load(n=200, now=None, seed=42):
     """A realistic district-scale pile, for timing and for seeding the demo."""
-    random.seed(seed)
+    rng = random.Random(seed)
     now = now or int(time.time() * 1000)
     reports = []
     centres = [offset(BASE_LAT, BASE_LON,
-                      random.uniform(-6000, 6000),
-                      random.uniform(-6000, 6000)) for _ in range(12)]
+                      rng.uniform(-6000, 6000),
+                      rng.uniform(-6000, 6000)) for _ in range(12)]
 
     for i in range(n):
-        clat, clon = random.choice(centres)
-        lat, lon = offset(clat, clon, random.uniform(-120, 120),
-                          random.uniform(-120, 120))
+        clat, clon = rng.choice(centres)
+        lat, lon = offset(clat, clon, rng.uniform(-120, 120),
+                          rng.uniform(-120, 120))
         reports.append(make_report(
-            f"L{i}", lat, lon, device=f"dev-{random.randint(1, 45)}",
-            water=random.choice(WATER_LEVELS),
-            minutes_ago=random.randint(1, 400),
-            rising=random.choice([0, 0, 1]),
-            road=random.choice(["yes", "no", "unknown"]),
-            loc_conf=random.choice([1.0, 1.0, 0.6]), now=now))
+            f"L{i}", lat, lon, device=f"dev-{rng.randint(1, 45)}",
+            water=rng.choice(WATER_LEVELS),
+            minutes_ago=rng.randint(1, 400),
+            rising=rng.choice([0, 0, 1]),
+            road=rng.choice(["yes", "no", "unknown"]),
+            loc_conf=rng.choice([1.0, 1.0, 0.6]), now=now, rng=rng))
 
     return {"reports": reports, "truth": {"expected_clusters": "about 12"}}
 
