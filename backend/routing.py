@@ -113,6 +113,20 @@ def _segment_hits_circle(a, b, centre, radius_m):
     return math.hypot(px, py) <= radius_m
 
 
+def zones_touching_roads(graph, zones):
+    """Which of these zones actually intersect at least one road edge.
+
+    A zone can be confirmed and drawn and still touch nothing on the map —
+    that is exactly the "danger data and road network live in different
+    places" bug this exists to catch. Used by the seed script so that bug
+    fails loudly instead of quietly making the routing demo meaningless.
+    """
+    edges = [(graph.nodes[a], graph.nodes[b]) for a, b in graph.edge_meta]
+    return [z for z in zones
+            if any(_segment_hits_circle(a, b, (z["lat"], z["lon"]), z["radius_m"])
+                   for a, b in edges)]
+
+
 def apply_zones(graph, zones):
     """
     Work out what each edge costs given the current danger map.

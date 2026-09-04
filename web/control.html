@@ -38,11 +38,12 @@
   .inc-row:hover{background:#FAFAFA}
   .inc-row.active{border-left:3px solid #E8593C;padding-left:13px;background:#FAFAFA}
   .inc-top{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
-  .inc-id{font-weight:bold;font-size:11.5px}
+  .inc-loc{font-weight:bold;font-size:11.5px}
   .inc-sev{color:#E8593C;font-weight:bold;font-size:11.5px;white-space:nowrap}
   .inc-text{margin-top:3px;font-size:11.5px;color:#1C1C1C;
             overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .inc-meta{margin-top:4px;font-size:10.5px;color:#8C8C8C;display:flex;gap:10px;flex-wrap:wrap}
+  .inc-id{margin-left:auto;color:#B4B4B4;font-weight:normal}
   .why{margin-top:8px;padding-top:8px;border-top:1px solid #ECECEC;font-size:11px}
   .why .total{font-weight:bold;margin-bottom:5px}
   .why ul{list-style:none}
@@ -363,9 +364,11 @@ function renderIncidents(){
         </div>`;
       }
     }
+    const loc = (r.lat === null || r.lat === undefined || r.lon === null || r.lon === undefined)
+      ? "location unknown" : `${r.lat.toFixed(4)}°, ${r.lon.toFixed(4)}°`;
     return `<div class="inc-row ${active ? "active" : ""}" onclick="selectReport('${esc(r.id).replace(/'/g, "\\'")}')">
       <div class="inc-top">
-        <span class="inc-id">${esc(r.id)}</span>
+        <span class="inc-loc">${esc(loc)}</span>
         <span class="inc-sev">sev ${esc(r.severity)}</span>
       </div>
       <div class="inc-text">${text}</div>
@@ -373,6 +376,7 @@ function renderIncidents(){
         <span>${ageStr(r.reported_at)}</span>
         <span>${esc(r.water_level || "level unknown")}</span>
         <span>${people} people</span>
+        <span class="inc-id">${esc(r.id)}</span>
       </div>
       ${whyHtml}
     </div>`;
@@ -450,21 +454,22 @@ function renderMap(){
     const confirmed = z.routing === "block";
     const fillOp = Math.max(0.14, Math.min(0.62, 0.16 + z.confidence * 0.5));
     const dash = confirmed ? "" : 'stroke-dasharray="7 5"';
-    const labelY1 = cy + rr + 13;
-    const labelY2 = cy + rr + 25;
+    // Detail (confidence, evidence) lives in the hover tooltip instead of a
+    // second line of on-map text — with a dozen zones on a small map, two
+    // lines each stacked below the circle collide into an unreadable mess.
+    // Only the danger level, already colour-coded, stays inline.
+    const tooltip = `${z.danger_name} · ${Math.round(z.confidence * 100)}% confidence` +
+      (confirmed ? "" : " (unconfirmed)") + ` — ${z.evidence}`;
     return `<g>
       <circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${rr.toFixed(1)}"
         fill="${color}" fill-opacity="${fillOp.toFixed(2)}"
-        stroke="${color}" stroke-width="1.6" ${dash}></circle>
-      <text x="${cx.toFixed(1)}" y="${labelY1.toFixed(1)}" text-anchor="middle"
-        font-size="10.5" font-weight="bold" fill="${color}"
+        stroke="${color}" stroke-width="1.6" ${dash}>
+        <title>${esc(tooltip)}</title>
+      </circle>
+      <text x="${cx.toFixed(1)}" y="${(cy + 3.5).toFixed(1)}" text-anchor="middle"
+        font-size="10.5" font-weight="bold" fill="${color}" pointer-events="none"
         style="paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round">
-        ${esc(z.danger_name)} · ${Math.round(z.confidence * 100)}% conf${confirmed ? "" : " (unconfirmed)"}
-      </text>
-      <text x="${cx.toFixed(1)}" y="${labelY2.toFixed(1)}" text-anchor="middle"
-        font-size="9" fill="#1C1C1C"
-        style="paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round">
-        ${esc(z.evidence)}
+        ${esc(z.danger_name)}
       </text>
     </g>`;
   }).join("");

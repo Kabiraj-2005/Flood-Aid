@@ -358,7 +358,8 @@ def _pick_separated_centres(count, seed):
     return centres
 
 
-def scene_realistic(n=240, incidents=12, now=None, seed=2026, accuracy=0.82):
+def scene_realistic(n=240, incidents=12, now=None, seed=2026, accuracy=0.82,
+                     centres=None):
     """Generate a district where each incident has a hidden physical truth.
 
     The important difference from ``scene_load`` is that reports are *observations*
@@ -378,6 +379,12 @@ def scene_realistic(n=240, incidents=12, now=None, seed=2026, accuracy=0.82):
     lowering accuracy makes observations noisier without changing the *kind*
     of noise.
 
+    ``centres`` overrides where incidents are placed — exactly ``incidents``
+    (lat, lon) pairs. Default is scattered, mutually separated points picked
+    at random (fine for benchmarking clustering in isolation). A caller that
+    needs incidents to land somewhere specific, such as on top of a road
+    network for a routing demo, supplies its own centres instead.
+
     ``truth`` is deliberately separate from the report payload. The clustering and
     danger code never sees it; the test suite uses it afterwards to measure error.
     """
@@ -395,7 +402,10 @@ def scene_realistic(n=240, incidents=12, now=None, seed=2026, accuracy=0.82):
 
     rng = random.Random(seed)
     now = now or int(time.time() * 1000)
-    centres = _pick_separated_centres(incidents, seed + 1)
+    if centres is None:
+        centres = _pick_separated_centres(incidents, seed + 1)
+    elif len(centres) != incidents:
+        raise ValueError("centres must have exactly `incidents` entries")
 
     # More severe incidents are somewhat less common, but all four states occur.
     truth_levels = rng.choices(
