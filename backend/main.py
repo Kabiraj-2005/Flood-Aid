@@ -19,7 +19,9 @@ from pydantic import BaseModel
 from pathlib import Path
 
 from . import db
-from .severity import compute_severity
+from .severity import compute_severity, explain
+from .danger import build_danger_map
+from .routing import route_to_safety
 
 app = FastAPI(title="FloodAid")
 
@@ -213,6 +215,79 @@ def list_reports():
     ).fetchall()
     conn.close()
     return {"reports": [db.row_to_dict(r) for r in rows]}
+
+
+@app.get("/api/danger")
+def danger_map():
+    """
+    The live danger map, built fresh from every report.
+
+    Rebuilt on each call rather than cached, because confidence decays with
+    the clock — a cached map is wrong the moment it is stored. At district
+    scale this takes about 15 ms, so caching would be a premature
+    optimisation that introduces staleness bugs for no gain.
+    """
+    conn = db.connect()
+    rows = conn.execute("SELECT * FROM reports").fetchall()
+    conn.close()
+    return build_danger_map([db.row_to_dict(r) for r in rows])
+
+
+@app.get("/api/reports/{report_id}/why")
+def why(report_id: str):
+    """The severity breakdown, for the line shown next to the score."""
+    conn = db.connect()
+    row = conn.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
+    conn.close()
+    if row is None:
+        return {"error": "not found"}
+    r = db.row_to_dict(row)
+    return {"severity": compute_severity(r), "because": explain(r)}
+
+
+@app.get("/api/route")
+def route(lat: float, lon: float, mode: str = "drive"):
+    """
+    Route from a position to the nearest safe zone that still has space.
+
+    NOTE: this endpoint exists for the control room. On the phone the same
+    search runs locally against the bundled road graph, because during a
+    flood there may be nothing to call. Server and device must give the
+    same answer — keep the logic in routing.py, not here.
+    """
+    conn = db.connect()
+    reports = [db.row_to_dict(r) for r in
+               conn.execute("SELECT * FROM reports").fetchall()]
+    zones_rows = conn.execute("SELECT * FROM safe_zones").fetchall()
+    conn.close()
+
+    graph = _road_graph()
+    if graph is None:
+        return {"found": False, "reason": "no road network loaded"}
+
+    danger = build_danger_map(reports)["zones"]
+    safe = [dict(z) for z in zones_rows]
+    result = route_to_safety(graph, lat, lon, safe, danger, mode)
+    result["danger_zones_considered"] = len(danger)
+    return result
+
+
+_GRAPH = None
+
+
+def _road_graph():
+    """
+    The road network.
+
+    Synthetic for now so the routing logic can be tested against known
+    answers. Swap this one function for an OpenStreetMap loader and
+    nothing else changes.
+    """
+    global _GRAPH
+    if _GRAPH is None:
+        from .fakedata import grid_town
+        _GRAPH = grid_town()
+    return _GRAPH
 
 
 @app.get("/api/health")
