@@ -326,7 +326,7 @@ def find_contradictions(group, now_ms, majority=None):
 
 # ---------------------------------------------------------- the map call
 
-def build_danger_map(reports, now_ms=None):
+def build_danger_map(reports, now_ms=None, radius_m=None):
     """
     The whole pipeline. Reports in, zones out.
 
@@ -337,9 +337,14 @@ def build_danger_map(reports, now_ms=None):
 
     A zone with confidence below HOLD_THRESHOLD is not drawn at all. We do
     not put a rumour on a map.
+
+    ``radius_m`` overrides CLUSTER_RADIUS_M for this call only — the actual
+    tuning constant still lives at the top of this file; this is for
+    sensitivity analysis (see benchmark_realistic.py), not retuning.
     """
     now_ms = now_ms or int(time.time() * 1000)
-    groups = cluster_reports(reports)
+    radius_m = CLUSTER_RADIUS_M if radius_m is None else radius_m
+    groups = cluster_reports(reports, radius_m=radius_m)
 
     zones, held = [], []
 
@@ -392,7 +397,7 @@ def build_danger_map(reports, now_ms=None):
             "cluster_id": f"z-{i}",
             "lat": sum(r["lat"] for r in located) / len(located),
             "lon": sum(r["lon"] for r in located) / len(located),
-            "radius_m": _zone_radius(located),
+            "radius_m": _zone_radius(located, radius_m),
             "danger": danger,
             "danger_name": DANGER_NAMES[danger],
             "meaning": DANGER_MEANING[danger],
@@ -433,11 +438,11 @@ def build_danger_map(reports, now_ms=None):
     }
 
 
-def _zone_radius(located):
+def _zone_radius(located, radius_m=CLUSTER_RADIUS_M):
     """How far the reports in this zone spread, plus the cluster radius."""
     if len(located) == 1:
-        return CLUSTER_RADIUS_M
+        return radius_m
     clat = sum(r["lat"] for r in located) / len(located)
     clon = sum(r["lon"] for r in located) / len(located)
     furthest = max(haversine_m(clat, clon, r["lat"], r["lon"]) for r in located)
-    return round(furthest + CLUSTER_RADIUS_M, 1)
+    return round(furthest + radius_m, 1)

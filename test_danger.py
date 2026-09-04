@@ -174,43 +174,17 @@ ok("no report carries a hidden incident id, index, or marker")
 # radius, both taken straight from res["zones"]) contain a hidden incident's
 # true center? This never looks at report ids or the truth's report_ids
 # lists — only at lat/lon, exactly like a human checking the map would.
-SLACK_M = 50.0  # zone radius already includes CLUSTER_RADIUS_M; a little more
-                # for centroid drift from noisy/held reports.
+# zone radius already includes CLUSTER_RADIUS_M; SLACK_M (see
+# fakedata.score_realistic) adds a little more for centroid drift from
+# noisy/held reports.
+score = fakedata.score_realistic(scene, res)
 
+print(f"        reports={len(scene['reports'])}  truth incidents={score['total']}")
+print(f"        produced zones={len(res['zones'])}  merges={score['merges']}  splits={score['splits']}")
+print(f"        incidents recovered={score['recovered']}/{score['total']}")
+print(f"        held observations={score['held']}")
 
-def _incidents_within(zone):
-    return [
-        inc["incident_id"] for inc in truth_incidents
-        if haversine_m(zone["lat"], zone["lon"],
-                        inc["center"]["lat"], inc["center"]["lon"])
-           <= zone["radius_m"] + SLACK_M
-    ]
-
-
-zone_incidents = [_incidents_within(z) for z in res["zones"]]
-
-# A merge is a produced zone whose footprint contains more than one hidden
-# incident's true center.
-merges = [ids for ids in zone_incidents if len(ids) > 1]
-
-# A split is a hidden incident whose true center falls inside more than one
-# produced zone's footprint.
-incident_zone_counts = {i["incident_id"]: 0 for i in truth_incidents}
-for ids in zone_incidents:
-    for incident_id in ids:
-        incident_zone_counts[incident_id] += 1
-splits = [incident_id for incident_id, count in incident_zone_counts.items() if count > 1]
-
-# A hidden incident is recovered when exactly one produced zone's footprint
-# contains its true center.
-recovered = sum(1 for count in incident_zone_counts.values() if count == 1)
-
-print(f"        reports={len(scene['reports'])}  truth incidents={len(truth_incidents)}")
-print(f"        produced zones={len(res['zones'])}  merges={len(merges)}  splits={len(splits)}")
-print(f"        incidents recovered={recovered}/{len(truth_incidents)}")
-print(f"        held observations={len(res['held'])}")
-
-assert len(merges) == 0, f"false merge(s): {merges}"
-assert len(splits) == 0, f"false split(s): {splits}"
-assert recovered == len(truth_incidents), (recovered, len(truth_incidents))
+assert score["merges"] == 0, f"false merge(s): {score['merges']}"
+assert score["splits"] == 0, f"false split(s): {score['splits']}"
+assert score["recovered"] == score["total"], (score["recovered"], score["total"])
 ok("realistic correlated incidents remain separate and recoverable")

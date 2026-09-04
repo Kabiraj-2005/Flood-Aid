@@ -198,6 +198,140 @@ def scene_aerial(now=None, seed=1003):
     }
 
 
+def scene_hard_clustering(now=None, seed=3001):
+    """
+    Purpose-built to stress single-link clustering's two opposite failure
+    modes at once, so a chosen CLUSTER_RADIUS_M can't dodge one by tripping
+    the other:
+
+      - I0 / I1: two genuine, separate incidents whose centres are 200 m
+        apart — just outside the default 150 m CLUSTER_RADIUS_M. At the
+        default radius they must stay two zones. If they merge, the radius
+        is too generous.
+      - STREET: one real incident, a flooded street 400 m long, reported
+        roughly every 60 m along its length. Single-link chaining must hold
+        it together as ONE zone even though its own span is far bigger than
+        CLUSTER_RADIUS_M. If it splits, the radius is too tight.
+
+    Report ids encode nothing about incident identity beyond a bare index —
+    the truth block, not the payload, is what scoring reads.
+    """
+    rng = random.Random(seed)
+    now = now or int(time.time() * 1000)
+    reports = []
+    truth_incidents = []
+
+    def add_point_incident(incident_id, centre, n_reports, n_devices, tag):
+        clat, clon = centre
+        devices = [f"dev-{tag}-{i}" for i in range(n_devices)]
+        ids = []
+        for i in range(n_reports):
+            # A tight few-metre footprint: this is one place, not a spread.
+            radius = 15.0 * math.sqrt(rng.random())
+            angle = rng.uniform(0, 2 * math.pi)
+            lat, lon = offset(clat, clon,
+                               radius * math.cos(angle), radius * math.sin(angle))
+            rid = f"{tag}-{i}"
+            ids.append(rid)
+            reports.append(make_report(
+                rid, lat, lon, device=rng.choice(devices), water="waist",
+                minutes_ago=rng.randint(5, 25), rising=1, road="no",
+                now=now, rng=rng))
+        truth_incidents.append({
+            "incident_id": incident_id, "kind": "point",
+            "center": {"lat": clat, "lon": clon}, "report_ids": ids,
+        })
+
+    gap_m = 200.0  # centre-to-centre distance between I0 and I1
+    c0 = (BASE_LAT, BASE_LON)
+    c1 = offset(BASE_LAT, BASE_LON, 0, gap_m)
+    add_point_incident("I0", c0, 4, 3, "P0")
+    add_point_incident("I1", c1, 4, 3, "P1")
+
+    # STREET: far from I0/I1 so the radius sweep can't accidentally connect
+    # them — this incident is testing splitting, not merging.
+    street_start = offset(BASE_LAT, BASE_LON, 3000, 0)
+    span_m = 400.0
+    n_gaps = 7  # 8 points, ~57 m apart on average -> "roughly every 60 m"
+    ids = []
+    travelled = 0.0
+    prev = street_start
+    max_gap_m = 0.0
+    for i in range(n_gaps + 1):
+        if i:
+            gap = (span_m / n_gaps) * rng.uniform(0.9, 1.1)
+            travelled += gap
+        # a couple of metres of cross-street GPS wobble
+        lat, lon = offset(street_start[0], street_start[1],
+                           travelled, rng.uniform(-3, 3))
+        if i:
+            max_gap_m = max(max_gap_m, haversine_m(prev[0], prev[1], lat, lon))
+        prev = (lat, lon)
+        rid = f"ST-{i}"
+        ids.append(rid)
+        reports.append(make_report(
+            rid, lat, lon, device=f"dev-street-{i}", water="waist",
+            minutes_ago=rng.randint(5, 25), rising=1, road="no",
+            now=now, rng=rng))
+    truth_incidents.append({
+        "incident_id": "STREET", "kind": "line", "report_ids": ids,
+        "span_m": span_m, "max_consecutive_gap_m": round(max_gap_m, 1),
+    })
+
+    rng.shuffle(reports)
+
+    return {
+        "reports": reports,
+        "truth": {
+            "incidents": truth_incidents,
+            "point_gap_m": gap_m,
+            "street_span_m": span_m,
+        },
+    }
+
+
+def score_hard_clustering(scene, result):
+    """Score a build_danger_map result against a scene_hard_clustering truth.
+
+    Unlike score_realistic, this reads which produced zone each known report
+    id landed in directly — exact, since every report's true incident is
+    known by construction rather than approximated from a circular footprint,
+    which would misjudge the elongated STREET incident. Reports left out of
+    every zone (held, or in a zone whose confidence never cleared the
+    drawing threshold) count as neither merged nor split; they're reported
+    separately as `unresolved`.
+    """
+    truth_incidents = scene["truth"]["incidents"]
+    id_to_incident = {rid: inc["incident_id"]
+                       for inc in truth_incidents for rid in inc["report_ids"]}
+
+    zone_truth_ids = []          # per zone: set of truth incident ids touched
+    incident_zone_indices = {}   # truth incident id -> set of zone indices it appears in
+    for zi, zone in enumerate(result["zones"]):
+        touched = set()
+        for rid in zone["report_ids"]:
+            tid = id_to_incident.get(rid)
+            if tid is not None:
+                touched.add(tid)
+                incident_zone_indices.setdefault(tid, set()).add(zi)
+        zone_truth_ids.append(touched)
+
+    merges = [sorted(ids) for ids in zone_truth_ids if len(ids) > 1]
+    splits = [tid for tid, zones_seen in incident_zone_indices.items()
+              if len(zones_seen) > 1]
+
+    mapped_ids = {rid for zone in result["zones"] for rid in zone["report_ids"]}
+    unresolved = [rid for rid in id_to_incident if rid not in mapped_ids]
+
+    return {
+        "merges": len(merges),
+        "merged_incident_pairs": merges,
+        "splits": len(splits),
+        "split_incidents": splits,
+        "unresolved": len(unresolved),
+    }
+
+
 def _level_step(level, delta):
     """Move a water level up/down while staying inside the four observed levels."""
     i = WATER_LEVELS.index(level)
@@ -224,7 +358,7 @@ def _pick_separated_centres(count, seed):
     return centres
 
 
-def scene_realistic(n=240, incidents=12, now=None, seed=2026):
+def scene_realistic(n=240, incidents=12, now=None, seed=2026, accuracy=0.82):
     """Generate a district where each incident has a hidden physical truth.
 
     The important difference from ``scene_load`` is that reports are *observations*
@@ -237,6 +371,13 @@ def scene_realistic(n=240, incidents=12, now=None, seed=2026):
       - mostly correct reports plus a small amount of adjacent-level noise;
       - realistic report ages and location uncertainty.
 
+    ``accuracy`` is the probability a single observation matches the hidden
+    true water level (default 0.82, matching the original fixed noise model).
+    The remaining probability mass is split between adjacent-level noise and
+    arbitrary outliers in the same 14:4 ratio the original model used, so
+    lowering accuracy makes observations noisier without changing the *kind*
+    of noise.
+
     ``truth`` is deliberately separate from the report payload. The clustering and
     danger code never sees it; the test suite uses it afterwards to measure error.
     """
@@ -244,6 +385,13 @@ def scene_realistic(n=240, incidents=12, now=None, seed=2026):
         raise ValueError("n must be at least the number of incidents")
     if incidents < 1:
         raise ValueError("incidents must be positive")
+    if not 0.0 < accuracy <= 1.0:
+        raise ValueError("accuracy must be in (0, 1]")
+
+    remainder = 1.0 - accuracy
+    adjacent_p = remainder * (14 / 18)
+    outlier_p = remainder - adjacent_p
+    adjacent_threshold = accuracy + adjacent_p
 
     rng = random.Random(seed)
     now = now or int(time.time() * 1000)
@@ -293,9 +441,9 @@ def scene_realistic(n=240, incidents=12, now=None, seed=2026):
             # Most observations match reality. A smaller fraction is one level
             # away; a few are deliberately bad observations.
             roll = rng.random()
-            if roll < 0.82:
+            if roll < accuracy:
                 observed = true_level
-            elif roll < 0.96:
+            elif roll < adjacent_threshold:
                 observed = _level_step(true_level, rng.choice([-1, 1]))
             else:
                 observed = rng.choice(WATER_LEVELS)
@@ -351,13 +499,59 @@ def scene_realistic(n=240, incidents=12, now=None, seed=2026):
             "expected_clusters": incidents,
             "incidents": truth_incidents,
             "noise_model": {
-                "correct_observation_probability": 0.82,
-                "adjacent_level_probability": 0.14,
-                "arbitrary_outlier_probability": 0.04,
+                "correct_observation_probability": accuracy,
+                "adjacent_level_probability": adjacent_p,
+                "arbitrary_outlier_probability": outlier_p,
                 "max_report_radius_m": 75,
                 "min_centre_separation_m": 500,
             },
         },
+    }
+
+
+def score_realistic(scene, result, slack_m=50.0):
+    """Score a build_danger_map result against a scene_realistic truth block.
+
+    Scores by geometry only: a produced zone (its centroid and radius, taken
+    straight from ``result["zones"]``) either contains a hidden incident's
+    true center or it doesn't — exactly like a human checking the map would.
+    Never looks at report ids or the truth's report_ids lists.
+    """
+    truth_incidents = scene["truth"]["incidents"]
+
+    def incidents_within(zone):
+        return [
+            inc["incident_id"] for inc in truth_incidents
+            if haversine_m(zone["lat"], zone["lon"],
+                            inc["center"]["lat"], inc["center"]["lon"])
+               <= zone["radius_m"] + slack_m
+        ]
+
+    zone_incidents = [incidents_within(z) for z in result["zones"]]
+
+    # A merge is a produced zone whose footprint contains more than one
+    # hidden incident's true center.
+    merges = [ids for ids in zone_incidents if len(ids) > 1]
+
+    # A split is a hidden incident whose true center falls inside more than
+    # one produced zone's footprint.
+    incident_zone_counts = {i["incident_id"]: 0 for i in truth_incidents}
+    for ids in zone_incidents:
+        for incident_id in ids:
+            incident_zone_counts[incident_id] += 1
+    splits = [incident_id for incident_id, count in incident_zone_counts.items()
+              if count > 1]
+
+    # A hidden incident is recovered when exactly one produced zone's
+    # footprint contains its true center.
+    recovered = sum(1 for count in incident_zone_counts.values() if count == 1)
+
+    return {
+        "recovered": recovered,
+        "total": len(truth_incidents),
+        "merges": len(merges),
+        "splits": len(splits),
+        "held": len(result["held"]),
     }
 
 
